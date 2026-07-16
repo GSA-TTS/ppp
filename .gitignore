@@ -1,0 +1,7 @@
+# Fallback cache for the universal behavioral contract — never commit.
+# The canonical contract is provided by the environment; see README.
+.agents/cache/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]

@@ -1,0 +1,56 @@
+# Universal behavioral contract prerequisite check (fail-closed).
+# Provisions the contract to the conventional home path, then verifies it is
+# available offline. Ensures agent-invoking CI checks have the contract present.
+name: Contract Prerequisite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ensure-contract:
+    name: Ensure universal behavioral contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Provide the universal contract to the environment. The playbook repo is
+      # private, so this uses an authenticated fetch of AGENTS.md at a pinned
+      # tag via the GitHub Contents API. PLAYBOOK_TOKEN must be a repo/org secret
+      # holding a token with read access to GSA-TTS/agentic-coding-playbook.
+      # The probe then verifies availability offline (--no-fetch).
+      - name: Provision universal behavioral contract
+        env:
+          PLAYBOOK_TOKEN: ${{ secrets.PLAYBOOK_TOKEN }}
+          PLAYBOOK_REF: v0.14.0
+        run: |
+          if [ -z "$PLAYBOOK_TOKEN" ]; then
+            echo "::error::PLAYBOOK_TOKEN secret is not set. Add a token with read access to the private GSA-TTS/agentic-coding-playbook repo (Settings → Secrets and variables → Actions)." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.agentic-coding-playbook"
+          curl -fsSL \
+            -H "Authorization: Bearer ${PLAYBOOK_TOKEN}" \
+            -H "Accept: application/vnd.github.raw+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/GSA-TTS/agentic-coding-playbook/contents/AGENTS.md?ref=${PLAYBOOK_REF}" \
+            -o "$HOME/.agentic-coding-playbook/AGENTS.md"
+          # Sanity-check we got the canonical universal contract, not an error body.
+          grep -q 'role: universal' "$HOME/.agentic-coding-playbook/AGENTS.md" \
+            || { echo "::error::Fetched file is not the universal contract (missing 'role: universal')." >&2; exit 1; }
+
+      - name: Ensure contract is available (fail-closed)
+        run: python3 scripts/ensure-contract.py --root . --no-fetch
