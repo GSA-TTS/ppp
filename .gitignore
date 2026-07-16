@@ -5,3 +5,6 @@
 # Python bytecode cache
 __pycache__/
 *.py[cod]
+
+# Go build artifacts
+/bin/
