@@ -1,0 +1,104 @@
+# Build the ppp dev container and push it to GHCR (ticket #15 / T2).
+#
+# Developers PULL this prebuilt, multi-arch image (see .devcontainer/README.md)
+# rather than building locally. The build fetches the private universal
+# behavioral contract at build time via a BuildKit --secret (PLAYBOOK_TOKEN),
+# exactly as .devcontainer/Dockerfile expects; the token is never baked into a
+# layer. The pushed digest is emitted in the job summary so devcontainer.json
+# can be pinned by digest.
+name: Dev Container Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".devcontainer/**"
+      - ".github/workflows/devcontainer.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: devcontainer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/gsa-tts/ppp-devcontainer
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & push multi-arch dev container
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU (multi-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      # Fail fast with a clear message if the contract secret is missing — the
+      # Dockerfile's contract step also fails closed, but this is friendlier.
+      - name: Ensure PLAYBOOK_TOKEN is configured
+        env:
+          PLAYBOOK_TOKEN: ${{ secrets.PLAYBOOK_TOKEN }}
+        run: |
+          if [ -z "$PLAYBOOK_TOKEN" ]; then
+            echo "::error::PLAYBOOK_TOKEN secret is not set. Add a token with read access to the private GSA-TTS/agentic-coding-playbook repo (Settings → Secrets and variables → Actions)." >&2
+            exit 1
+          fi
+
+      - name: Build & push (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .devcontainer/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            playbook_token=${{ secrets.PLAYBOOK_TOKEN }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Emit pushed digest
+        run: |
+          {
+            echo "### ppp dev container pushed"
+            echo ""
+            echo "- **Image:** \`${IMAGE}\`"
+            echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`"
+            echo "- **Tags:** \`${{ steps.meta.outputs.tags }}\`"
+            echo ""
+            echo "Pin \`.devcontainer/devcontainer.json\` to:"
+            echo ""
+            echo '```jsonc'
+            echo "\"image\": \"${IMAGE}@${{ steps.build.outputs.digest }}\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

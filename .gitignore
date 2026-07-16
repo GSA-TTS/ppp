@@ -8,3 +8,6 @@ __pycache__/
 
 # Go build artifacts
 /bin/
+
+# Agent session transcripts
+session-*.md

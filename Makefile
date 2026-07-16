@@ -10,7 +10,12 @@ BINARY   := $(BIN_DIR)/ppp
 CONTRACT := ./scripts/ensure-contract.sh
 
 # Pinned dev-tool versions (AGENTS.md: no floating ranges). Keep these in sync
-# with the versions installed in .devcontainer (ticket #15 / T2).
+# with the versions installed in .devcontainer (ticket #15 / T2) and CI.
+#   go            1.22.x   (go.mod language floor)
+#   goimports     v0.48.0
+#   golangci-lint v2.12.2
+#   mitmproxy     12.2.3    (ADR-0003/spec pin; WireGuard client-config format)
+#   podman        6.0.x     (client; verified against 6.0.1)
 GOIMPORTS_VERSION    := v0.48.0
 GOLANGCI_LINT_VERSION := v2.12.2
 

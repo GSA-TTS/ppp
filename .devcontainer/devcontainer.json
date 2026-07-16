@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "ppp (Podman Plus Proxy) — sandbox-safe dev",
+
+  // Developers PULL the prebuilt, multi-arch image from GHCR (no local build).
+  // CI (.github/workflows/devcontainer.yml) builds + pushes it — passing
+  // PLAYBOOK_TOKEN as a BuildKit --secret — and emits the pushed DIGEST in its
+  // job summary. Pin this reference to that digest for reproducibility, e.g.:
+  //   "image": "ghcr.io/gsa-tts/ppp-devcontainer@sha256:<digest-from-CI>"
+  // `:latest` is used here until CI has published the first digest.
+  "image": "ghcr.io/gsa-tts/ppp-devcontainer:latest",
+
+  // LOCAL REBUILD / OVERRIDE (uncomment the whole "build" block AND comment out
+  // the "image" line above). This builds .devcontainer/Dockerfile locally and
+  // passes the contract token as a BuildKit secret from the PLAYBOOK_TOKEN env
+  // var in the shell that launched VS Code / the devcontainer CLI. The token is
+  // never written to a layer. See .devcontainer/README.md.
+  //
+  // "build": {
+  //   "dockerfile": "Dockerfile",
+  //   "context": "..",
+  //   "options": [
+  //     "--secret",
+  //     "id=playbook_token,env=PLAYBOOK_TOKEN"
+  //   ]
+  // },
+
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspaces/ppp",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/ppp,type=bind,consistency=cached",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "go.toolsManagement.checkForUpdates": "off",
+        "go.useLanguageServer": true,
+        "go.gopath": "/go",
+        "go.goroot": "/usr/lib/go-1.26",
+        "python.defaultInterpreterPath": "/opt/venv/bin/python3",
+        "python.terminal.activateEnvironment": false,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}
