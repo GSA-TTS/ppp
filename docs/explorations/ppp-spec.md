@@ -24,7 +24,7 @@ For more on `ppp`'s place in the broader agentic-coding-quickstart ecosystem alo
 - Provide a CLI `ppp` with all top-level subcommands of the real Docker `sbx` **except `login` and `logout`**, with behavior faithful in spirit (not binary-compatible).
 - Each sandbox is an isolated Linux micro-VM (**exactly one dedicated Podman Machine per sandbox — VMs are never shared between sandboxes**), with a separate kernel.
 - All VM egress traffic is transparently tunneled through a **single** host-side mitmproxy process via WireGuard — no application-level proxy env, no per-app config.
-- A single mitmproxy instance audits network policy across **all** sandboxes simultaneously. Each sandbox is assigned a distinct WireGuard server instance (unique UDP port + keypair) within the same mitmdump process, and a distinct inner tunnel IP (`10.0.0.1`–`10.0.0.N`). The addon distinguishes sandboxes by the **receiving WireGuard instance** — i.e. `flow.client.sockname` (the server-side listen port). This binding is cryptographic (each port has its own keypair) and cannot be forged from inside the guest. (The inner tunnel IP is *not* a reliable discriminator — mitmproxy hardcodes `Address = 10.0.0.1/32` in every generated client config, and even after we rewrite it per sandbox a `sudo`-capable agent could reassign its own `wg0` address; the listen port cannot be changed by the guest.)
+- A single mitmproxy instance audits network policy across **all** sandboxes simultaneously. Each sandbox is assigned a distinct WireGuard server instance (unique UDP port + keypair) within the same mitmdump process, and a distinct inner tunnel IP (`10.0.0.1`–`10.0.0.N`). The addon distinguishes sandboxes by the **receiving WireGuard instance** — i.e. the flow's proxy-mode listen port (`flow.client_conn.proxy_mode.listen_port()` on mitmproxy 12.2.3; **not** `flow.client.sockname`, which surfaces the inner destination on that version). This binding is cryptographic (each port has its own keypair) and cannot be forged from inside the guest. (The inner tunnel IP is *not* a reliable discriminator — mitmproxy hardcodes `Address = 10.0.0.1/32` in every generated client config, and even after we rewrite it per sandbox a `sudo`-capable agent could reassign its own `wg0` address; the listen port cannot be changed by the guest.)
 - Policies (allow/deny) and secrets (API keys, custom tokens) are enforced/injected **from the host** — secrets never enter the sandbox.
 - Supported host platforms: **macOS and Windows** (primary); Linux works but is best-effort.
 - Supported agent: **`opencode`** only at v1 (agent registry is extensible).
@@ -97,15 +97,15 @@ Endpoint = <auto-detected local IP>:<port>
 
 **Sandbox identification — use the listen port (`sockname`), not the inner IP (`peername`).** Verified by reading the Rust/Python data path and by a live two-instance spike:
 - Inside `mitmproxy_rs`, the decrypted **inner IPv4 source address** (`packet.src_addr()`, `wireguard.rs:261/267`) becomes the connection's `src_addr`, which surfaces to the addon as `flow.client.peername` / `flow.client.address` (`tcp.rs:120,153` → `task.rs:77` → `server.py:475`). That value is whatever address `wg-quick` assigned to the guest's `wg0` — i.e. the `Address =` line we wrote. A `sudo`-capable agent (the Docker `sbx` model gives the agent sudo; §5.7) could `ip addr change wg0` to another sandbox's `10.0.0.M` and thereby inherit that sandbox's policy + injected secrets. **So `flow.client.address` is spoofable and must not be the trust anchor.**
-- The **server-side socket** is per-instance: each `--mode wireguard@<port>` binds its own UDP socket (`create_and_bind_udp_socket(self.listen_addr)`, `wireguard.rs:85`), and the connection's `dst_addr = self.socket.local_addr()` (`wireguard.rs:73/104`) surfaces as `flow.client.sockname`. Because each port has a distinct keypair and the guest cannot move its traffic to a different host UDP port without the corresponding server private key, **the listen port is a cryptographically-bound, unspoofable discriminator.** The addon maps `sockname.port → sandbox_name`.
+- The **server-side socket** is per-instance: each `--mode wireguard@<port>` binds its own UDP socket (`create_and_bind_udp_socket(self.listen_addr)`, `wireguard.rs:85`), and the receiving instance is identified by the flow's **proxy mode** — `flow.client_conn.proxy_mode.listen_port()` / `.full_spec` (verified on mitmproxy 12.2.3 via live e2e spike; `flow.client.sockname` is the inner *destination* on that version, not the listen port). Because each port has a distinct keypair and the guest cannot move its traffic to a different host UDP port without the corresponding server private key, **the listen port is a cryptographically-bound, unspoofable discriminator.** The addon maps `listen_port → sandbox_name`.
 - **Spike confirmation** (`mitmdump 12.2.3`, two instances `@51820` + `@51821` in one process): both client configs were emitted, each fenced by a line of exactly 60 hyphens; keys files were auto-generated as JSON `{server_key, client_key}` when the paths did not pre-exist (confirming the "don't pre-create empty files" fix); and both configs carried the hardcoded `Address = 10.0.0.1/32` with distinct `Endpoint = <ip>:51820` / `:51821` lines — confirming the port is the only per-instance distinguisher present in the config.
 
 **⚠️ `process_outgoing_packet` fallback:** when no peer matches a destination IP, `mitmproxy_rs` logs `"No peer found for IP …, falling back to first peer"` and routes to the first peer (`wireguard.rs:326-333`). With 80 instances in one process this is worth exercising under load; per-instance keypairs make cross-routing unlikely, but the addon should never rely on return-path IP identity.
 
 **How the config is emitted (verified against `mode_servers.py:377-379`):** each WG instance logs its client config once at startup via `logger.info("-" * 60 + "\n" + conf + "\n" + "-" * 60)`. This means:
-- The config appears in the **mitmdump log stream (stderr, INFO level)**, not on a clean stdout pipe. The supervisor must read the process's captured log (`$PPP_DATA/proxy.log`).
-- Each block is fenced by a line of **exactly 60 hyphens** (`-` × 60), **not** `---`. The capture parser (`internal/proxy/capture.go`) must match `^-{60}$`.
-- Blocks are not tagged with their port; the supervisor correlates each block to a port by the order the `--mode wireguard` flags were passed (and can cross-check the `Endpoint = host:<port>` line inside each block).
+- The config is written to the mitmdump process's **stdout** (verified via a live 12.2.3 spike, `2>&1`-merged capture; the earlier "stderr/INFO" note was wrong). The supervisor captures the child's combined stdout/stderr to `$PPP_DATA/proxy.log` and parses from there.
+- The opening fence line carries a `[timestamp]` prefix; the **closing fence is a bare line of exactly 60 hyphens** (`-` × 60), **not** `---` (`od -c`-verified). The capture parser (`internal/proxy/capture.go`) should match the 60-hyphen fence and tolerate the timestamp prefix on the opener.
+- **Blocks are NOT emitted in `--mode` flag order — emission order is non-deterministic.** The supervisor MUST correlate each block to its port by reading the `Endpoint = host:<port>` line **inside** the block, never by flag order. (This corrects the earlier "correlate by flag order" guidance.)
 
 #### Cannot manually add peers to a single WG instance without forking
 
@@ -194,7 +194,7 @@ Host (macOS or Windows)
 
 One `mitmdump` process starts with up to 80 `--mode wireguard` flags, one per pre-allocated port (51820–51899). Each WG instance has its own keys file at `$PPP_DATA/wg/keys-<port>.conf`. When a sandbox starts, it claims the next free port; when it stops, the port is freed. Unused WG instances sit idle (no connected client = no traffic = negligible overhead).
 
-The addon reads `flow.client.sockname` (the server-side listen address, whose **port** identifies the receiving WG instance, e.g. `:51821`) to identify which sandbox a flow belongs to, then applies that sandbox's policy and scoped secrets. This is unspoofable — each port has its own keypair, so the agent inside the VM cannot move its traffic to another sandbox's WG instance without that instance's server private key. (The inner tunnel IP from `flow.client.address` is logged for readability but is *not* the trust anchor; see §3.1.)
+The addon reads the flow's proxy-mode listen port (`flow.client_conn.proxy_mode.listen_port()`, e.g. `51821`; **not** `flow.client.sockname` on 12.2.3) to identify which sandbox a flow belongs to, then applies that sandbox's policy and scoped secrets. This is unspoofable — each port has its own keypair, so the agent inside the VM cannot move its traffic to another sandbox's WG instance without that instance's server private key. (The inner tunnel IP from `flow.client.address` is logged for readability but is *not* the trust anchor; see §3.1.)
 
 **Port pool lifecycle:**
 ```
@@ -202,7 +202,7 @@ ppp daemon start:
   ├─ ensure 80 keys files exist in $PPP_DATA/wg/ (leave missing paths absent; mitmdump generates them — never pre-create empty files)
   ├─ build mitmdump command with 80 --mode wireguard flags
   ├─ spawn mitmdump as child process
-  ├─ capture the mitmdump log (stderr/INFO): parse client config blocks, each fenced by a line of 60 hyphens ("-" × 60)
+  ├─ capture the mitmdump stdout (to proxy.log): parse client config blocks, each closed by a line of 60 hyphens ("-" × 60), correlate by the Endpoint port inside each block
   ├─ store client configs in $PPP_DATA/wg/client-confs.json (indexed by port)
   └─ write PID to $PPP_DATA/proxy.pid
 
@@ -210,7 +210,7 @@ ppp run opencode ./myrepo:
   ├─ allocate next free port (e.g., 51820) + inner IP (10.0.0.1)
   ├─ take the pre-generated client config for port 51820 from client-confs.json
   ├─ rewrite Address = 10.0.0.1/32 (already correct for first sandbox)
-  ├─ rewrite Endpoint = <host-reachable-IP>:51820
+  ├─ rewrite Endpoint = 192.168.127.254:51820  (gvproxy host alias — NOT the host LAN IP)
   ├─ write wg0.conf into $PPP_DATA/sandboxes/<name>/wg0.conf
   ├─ podman machine init <name> --import-native-ca + other flags
   ├─ podman machine start <name>
@@ -244,27 +244,27 @@ Dependencies: `podman` CLI.
 
 ### 5.2 Prov (idempotent provision script)
 
-Embedded `assets/provision.sh`, executed via `podman machine ssh <name> -- bash /tmp/provision.sh`. The script is copied into the VM via **`podman machine cp <local> <name>:/tmp/provision.sh`** (a real subcommand, verified against `podman` v6.0.1 — its own help shows copying a CA cert into the machine) or via `podman machine ssh` + heredoc. Runs **every boot** (we re-run it on `ppp run --name <existing>` if the WG interface isn't up). Must be idempotent.
+Embedded `assets/provision.sh`, executed via `podman machine ssh <name> -- bash /tmp/provision.sh`. The script is copied into the VM via **`podman machine cp <local> <name>:/tmp/provision.sh`** (a real subcommand, verified against `podman` v6.0.1). Runs **every boot** (we re-run it on `ppp run --name <existing>` if the WG interface isn't up). Must be idempotent.
 
-> **Alternative provisioning primitive:** `podman machine init` also accepts `--playbook <file>` (runs an Ansible playbook after first boot) and `--now` (start immediately after init). v1 uses the post-start `ssh -- provision.sh` path for portability, but `--playbook` is a more declarative option worth evaluating for the one-shot first-boot steps (package install, opencode pull), leaving only the every-boot steps to `ssh`.
+> **Provisioning path decision (wayfinder #6):** v1 uses `ssh -- provision.sh` (copied via `podman machine cp`), **not** `podman machine init --playbook`. Reasons: no Ansible dependency in the guest, easier to debug (plain shell + `machine.log`), and it runs identically on re-attach. `--playbook` may be revisited later if provisioning grows.
 
-Steps:
-1. Install WireGuard: `rpm-ostree install wireguard-tools` (FCOS uses rpm-ostree, not apt). Reboot if rpm-ostree requires it (check with `rpm-ostree status`).
-2. Copy `wg0.conf` into `/etc/wireguard/wg0.conf` + `chmod 600`.
-3. **Pin an off-tunnel route to the WG endpoint (prevents a routing loop).** The generated `wg0.conf` uses `AllowedIPs = 0.0.0.0/0`, so `wg-quick` will try to route *all* traffic — including the encrypted WireGuard packets destined for the host `Endpoint` — back into the tunnel, which loops (mitmproxy documents this exact limitation: it "cannot proxy its own host's traffic"). In the Podman Machine guest the off-tunnel path to the host is the gvproxy virtual gateway (`gvisor-tap-vsock`, default gateway `192.168.127.1`, which relays to the host via vsock). Before `wg-quick up`, add a host-route exception so the endpoint stays off-tunnel:
-   - Determine the endpoint IP from `wg0.conf`'s `Endpoint =` line and the guest's default gateway (`ip route show default` → typically `192.168.127.1`).
-   - `ip route add <endpoint-ip>/32 via <gvproxy-gateway>` (idempotent: `ip route replace`).
-   - `wg-quick` normally installs its own `fwmark`/`suppress_prefixlength` rules for `0.0.0.0/0`; this explicit `/32` route to the endpoint takes longer-prefix precedence and keeps WG's own datagrams flowing through gvproxy. (Alternatively set `Table = off` in `[Interface]` and manage routes manually — v1 uses the explicit exception route.)
-4. Enable + start: `systemctl enable --now wg-quick@wg0`.
-5. Wait for tunnel to come up: `until wg show wg0; do sleep 1; done`.
-6. Fetch mitmproxy CA: `curl -s http://mitm.it/cert/pem -o /etc/pki/ca-trust/source/anchors/mitmproxy.crt && update-ca-trust`. (`mitm.it` is a magic hostname intercepted by the proxy, so this must run *after* the tunnel is up.)
-7. Disable IPv6: `sysctl -w net.ipv6.conf.all.disable_ipv6=1` (persisted in `/etc/sysctl.d/99-ppp.conf`). Matches mitmproxy's IPv4-only `AllowedIPs`.
-8. Pull opencode container image: `podman pull <our-registry/opencode:latest>`.
-9. Write `/var/lib/ppp/.provisioned` marker (gates steps 1 and 8 on subsequent boots).
+Steps (verified against a live `machine-os:6.0` / FCOS 44 spike, wayfinder #5):
+1. **Ensure WireGuard is available (no install, no reboot on macOS).** `wireguard-tools` is already present in the Podman `machine-os` base image and the kernel `wireguard` module loads, so provisioning does **not** run `rpm-ostree install` on the primary path (this retires spec Risk #2 for macOS). Just ensure the module is loaded (`modprobe wireguard`). Keep `rpm-ostree install --apply-live wireguard-tools` **only** as a drift safety-net if a future image ever lacks the package.
+2. Copy `wg0.conf` into `/etc/wireguard/wg0.conf` + `chmod 600`. The written config sets **`Table = off`** in `[Interface]` and **omits the `DNS =` line** (see step 3 and the DNS note).
+3. **Routing — `Table = off` + manual routes (prevents a routing loop; wayfinder #4).** With `AllowedIPs = 0.0.0.0/0`, `wg-quick` would otherwise route *all* traffic — including the encrypted WireGuard datagrams to the host `Endpoint` — into the tunnel, which loops. Setting `Table = off` stops `wg-quick` from installing its own `fwmark`/`suppress_prefixlength` default-routing (verified: `add_default()` in wg-quick, the sole source of those rules, is skipped when `Table=off`). We then manage routes explicitly:
+   - Determine the endpoint IP from `wg0.conf`'s `Endpoint =` line and the guest default gateway (`ip route show default`; on libkrun/gvproxy this is `192.168.127.1` — derive it, fall back to that literal).
+   - **Before** bringing up wg0: `ip route replace <endpoint-ip>/32 via <gvproxy-gateway>` (off-tunnel exception, longest-prefix wins).
+   - Bring up: `wg-quick up wg0`.
+   - **After** up: `ip route replace default dev wg0` (send everything else through the tunnel).
+4. Wait for tunnel to come up: `until wg show wg0; do sleep 1; done`.
+5. **Fetch mitmproxy CA (must run AFTER the tunnel is up; wayfinder #7):** `curl -s http://mitm.it/cert/pem -o /etc/pki/ca-trust/source/anchors/mitmproxy.crt && update-ca-trust`. `mitm.it` is a magic hostname intercepted by the proxy, so this only works once wg0 is up and the off-tunnel endpoint route is in place. This is belt-and-suspenders on top of host-side `--import-native-ca` (see §6.9 / wayfinder #7).
+6. Disable IPv6: `sysctl -w net.ipv6.conf.all.disable_ipv6=1` and `...default.disable_ipv6=1` (persisted in `/etc/sysctl.d/99-ppp.conf`). Matches mitmproxy's IPv4-only `AllowedIPs`.
+7. Pull opencode container image: `podman pull <our-registry/opencode:latest>`.
+8. Write `/var/lib/ppp/.provisioned` marker (gates step 7 on subsequent boots).
 
-Idempotency gate: steps 1 and 8 are behind `if [ ! -f /var/lib/ppp/.provisioned ]`. Steps 2–7 run every boot (they're inherently idempotent or must run every boot; the route add uses `ip route replace`, the CA fetch overwrites, sysctl is declarative).
+Idempotency gate: only step 7 (`podman pull`) is behind `if [ ! -f /var/lib/ppp/.provisioned ]`. Steps 1–6 run every boot (all inherently idempotent: module load is a no-op if loaded, `ip route replace` is declarative, the CA fetch overwrites, sysctl is declarative). Note vs. earlier drafts: there is no longer a one-shot package-install step to gate, because WireGuard ships in the base image.
 
-**DNS note:** the generated config sets `DNS = 10.0.0.53` (mitmproxy's hardcoded in-tunnel resolver). This routes guest DNS through the tunnel to mitmproxy rather than gvproxy's own resolver (`192.168.127.1`). Verify DNS resolves through mitmproxy once the tunnel is up (step 5); if mitmproxy's resolver is insufficient for the workload, an option is to drop the `DNS =` line and let gvproxy resolve — but that leaks DNS off-policy, so v1 keeps DNS in-tunnel.
+**DNS note (decided — ADR-0005):** the written `wg0.conf` **omits** the `DNS = 10.0.0.53` line. Keeping it makes `wg-quick` invoke the fragile `resolvconf` path, whose failure aborts the whole `up` on FCOS. The guest instead uses gvproxy's resolver (`192.168.127.1`). Egress **policy enforcement is unchanged** — the addon still intercepts and policies every connection regardless of which resolver returned the address; only DNS *lookups* are not visible in the flow log. See `docs/decisions/0005-guest-dns-off-tunnel-via-gvproxy.md`.
 
 ### 5.3 ProxySup (single mitmdump, multi-WG)
 
@@ -272,8 +272,8 @@ Dependencies: Python 3.9+, `mitmdump` on PATH (bundled or pip-installed on first
 
 - **Port pool:** pre-allocate ports 51820–51899 (80 sandboxes max). Generate one WG keys file per port at first daemon start. **Do not pre-create empty files** — mitmdump only writes a keys file when the path does *not* exist, and an empty (or otherwise non-JSON) file makes it raise `ValueError: Invalid configuration file` (`mode_servers.py:352-369`). Two valid approaches: (a) let mitmdump create each missing file on start (leave the path absent), or (b) have `ppp` write a valid `{"server_key": ..., "client_key": ...}` JSON file itself (keys generated via the same `mitmproxy_rs.wireguard.genkey()` scheme). v1 uses approach (a): pass paths that do not yet exist and let mitmdump populate them on first boot.
 - **Start:** `mitmdump --mode wireguard:$PPP_DATA/wg/keys-51820.conf@51820 --mode wireguard:$PPP_DATA/wg/keys-51821.conf@51821 ... -s <embedded_addon.py> --set ppp_state_dir="$PPP_DATA"`
-- **Capture client configs:** each WG instance logs its client config once at startup, fenced by a line of **exactly 60 hyphens** (`-` × 60), at INFO level on the mitmdump **log stream (stderr)** — *not* a clean stdout pipe (`mode_servers.py:377-379`). Read `$PPP_DATA/proxy.log`, match blocks with `^-{60}$` fences, parse each `[Interface]`/`[Peer]` block, correlate to a port by flag order (and cross-check the `Endpoint = host:<port>` line). Store indexed by port in `$PPP_DATA/wg/client-confs.json`.
-- **Rewrite client config per sandbox:** when a sandbox claims port N, take the client config for port N, rewrite `Address = 10.0.0.1/32` → `Address = 10.0.0.<sandbox-ip-octet>/32`, rewrite `Endpoint = ...` → `Endpoint = <host-reachable-ip>:<port>`. Write to `$PPP_DATA/sandboxes/<name>/wg0.conf`.
+- **Capture client configs:** each WG instance writes its client config once at startup to **stdout**, the opening fence carrying a `[timestamp]` prefix and the closing fence a bare line of **exactly 60 hyphens** (`-` × 60) (verified via live 12.2.3 spike; `mode_servers.py` logs `"-"*60 + conf + "-"*60`). Read `$PPP_DATA/proxy.log` (the captured child stdout/stderr), match the 60-hyphen fences, parse each `[Interface]`/`[Peer]` block, and **correlate each block to a port by its `Endpoint = host:<port>` line — NOT by `--mode` flag order, which is non-deterministic.** Store indexed by port in `$PPP_DATA/wg/client-confs.json`.
+- **Rewrite client config per sandbox:** when a sandbox claims port N, take the client config for port N, rewrite `Address = 10.0.0.1/32` → `Address = 10.0.0.<sandbox-ip-octet>/32`, rewrite `Endpoint = ...` → `Endpoint = 192.168.127.254:<port>` (the gvproxy host alias reachable from the guest — verified: the host LAN IP silently drops WG handshakes). Write to `$PPP_DATA/sandboxes/<name>/wg0.conf`.
 - **Lifecycle:** the daemon process starts once (via `ppp daemon start` or lazily on first `ppp run`) and stays running. `ppp daemon stop` kills it. `ppp daemon status` checks `$PPP_DATA/proxy.pid`.
 - **Log:** `$PPP_DATA/proxy.log` (mitmdump stdout/stderr).
 
@@ -281,8 +281,8 @@ Dependencies: Python 3.9+, `mitmdump` on PATH (bundled or pip-installed on first
 
 Embedded `assets/addon.py`. Loaded by the single mitmdump process. Handles flows from **all** WG instances.
 
-- **Sandbox identification:** `flow.client.sockname[1]` gives the **listen port** of the receiving WG instance (e.g., `51821`). The addon maintains an in-memory map `{port → sandbox_name}` loaded from `$PPP_DATA/port-registry.json` at startup and refreshed on SIGHUP. The inner IP (`flow.client.address`) is recorded in flow logs but is not used for identity (spoofable by a sudo agent; see §3.1).
-- **Policy enforcement (`request` hook):** look up sandbox_name from `flow.client.sockname` port. Load per-sandbox policy from `$PPP_DATA/sandboxes/<name>/policy.yaml` + global policy from `$PPP_CONFIG/policies.yaml`. Evaluate rules (deny wins, `**` = block-all, glob/regex host match, CIDR IP match). Deny → HTTP 403 (or 444 to kill connection). Log to `$PPP_DATA/flows.jsonl`.
+- **Sandbox identification:** `flow.client_conn.proxy_mode.listen_port()` gives the **listen port** of the receiving WG instance (e.g., `51821`) — verified on mitmproxy 12.2.3; `flow.client.sockname` is the inner destination on that version, so do NOT use it for identity. The addon maintains an in-memory map `{port → sandbox_name}` loaded from `$PPP_DATA/port-registry.json` at startup and refreshed on SIGHUP. The inner IP (`flow.client.address`) is recorded in flow logs but is not used for identity (spoofable by a sudo agent; see §3.1).
+- **Policy enforcement (`request` hook):** look up sandbox_name from the flow's proxy-mode listen port. Load per-sandbox policy from `$PPP_DATA/sandboxes/<name>/policy.yaml` + global policy from `$PPP_CONFIG/policies.yaml`. Evaluate rules (deny wins, `**` = block-all, glob/regex host match, CIDR IP match). Deny → HTTP 403 (or 444 to kill connection). Log to `$PPP_DATA/flows.jsonl`.
 - **Secret injection (`request` hook, post-policy):** if the request is to a known service host (api.anthropic.com, api.openai.com, github.com, etc.), query the Go parent for the secret via UDS, inject `Authorization` / `x-api-key` / `x-github-token` header, strip any client-supplied key. For custom secrets (placeholder → real value), regex-substitute in outbound headers.
 - **DNS-rebinding defense:** reject allowlisted hostnames that resolve to private/loopback/metadata IPs (incl. `169.254.169.254`) — from opencli-container.
 - **Exfil-size gating:** 413 on outbound payloads > 1MB, 413 on inbound > 10MB — from opencli-container.
@@ -385,7 +385,7 @@ Throughout this document, `$PPP_DATA` is used as the state base. Replace it with
    a. Allocate a sandbox name (`--name` or `ppp-<adjective>-<noun>`).
    b. Acquire `$PPP_DATA/state.lock`; allocate next free port from port-registry + inner IP (`10.0.0.<N>`, N = port - 51819).
    c. Ensure the daemon is running (start if not — `ppp daemon start` under the hood).
-   d. Fetch the pre-generated client config for this port from `$PPP_DATA/wg/client-confs.json`. Rewrite `Address` to `10.0.0.<N>/32` and `Endpoint` to `<host-reachable-ip>:<port>`. Write `wg0.conf`.
+   d. Fetch the pre-generated client config for this port from `$PPP_DATA/wg/client-confs.json`. Rewrite `Address` to `10.0.0.<N>/32` and `Endpoint` to `192.168.127.254:<port>` (gvproxy host alias). Write `wg0.conf`.
    e. `podman machine init <name> --import-native-ca --cpus <N> --memory <MiB> --disk-size <GiB>` (memory in MiB, disk in GiB — integers; see §5.1 unit translation). MAY use `--now` to fold in the start step.
    f. `podman machine start <name>`.
    g. Copy provision script into VM + execute: `podman machine ssh <name> -- bash /tmp/provision.sh`.
@@ -652,25 +652,25 @@ ppp run opencode ./myrepo
   ├─ allocate port 51820 + inner IP 10.0.0.1
   ├─ ensure daemon running (start if needed: spawn mitmdump with 80 WG instances)
   │                                                                ├─ mitmdump starts, logs
-  │                                                                │  80 client configs (INFO/stderr)
+  │                                                                │  80 client configs (stdout)
   │  ◄──────────────────────────────────────────────────────────────┤  (each fenced by "-" × 60)
   ├─ store client-confs.json
   ├─ take client config for port 51820
-  ├─ rewrite Address = 10.0.0.1/32, Endpoint = <host-ip>:51820
+  ├─ rewrite Address = 10.0.0.1/32, Endpoint = 192.168.127.254:51820
   ├─ write wg0.conf → $PPP_DATA/sandboxes/ppp-red-bird/wg0.conf
   ├─ podman machine init ppp-red-bird --import-native-ca ...
   ├─ podman machine start ppp-red-bird
   │     ┌─ VM boots (Fedora CoreOS, separate kernel) ──►
   │     │
   │     │  copy provision.sh into VM + execute:
-  │     │  ├─ rpm-ostree install wireguard-tools (+ reboot if needed)
-  │     │  ├─ cp wg0.conf → /etc/wireguard/wg0.conf
+  │     │  ├─ modprobe wireguard (already in machine-os; no rpm-ostree install / reboot)
+  │     │  ├─ cp wg0.conf → /etc/wireguard/wg0.conf  (Table=off, no DNS= line)
   │     │  ├─ ip route replace <endpoint-ip>/32 via 192.168.127.1  (off-tunnel: avoid WG loop)
-  │     │  ├─ systemctl enable --now wg-quick@wg0
+  │     │  ├─ wg-quick up wg0 ; ip route replace default dev wg0
   │     │  ├─ curl http://mitm.it/cert/pem → /etc/pki/ca-trust/source/anchors/mitmproxy.crt
   │     │  ├─ update-ca-trust
   │     │  ├─ sysctl disable IPv6
-  │     │  ├─ podman pull ghcr.io/ppp/opencode:latest
+  │     │  ├─ podman pull ghcr.io/ppp/opencode:latest  (one-shot, gated)
   │     │  └─ touch /var/lib/ppp/.provisioned
   │     │
   │     │  wg0 tunnel is up → all VM traffic routes to host:51820
@@ -678,7 +678,7 @@ ppp run opencode ./myrepo
   │     │                                                        ├─ mitmdump WG server on :51820
   │     │                                                        │  decrypts WG, parses TCP/UDP
   │     │                                                        ├─ addon.request(flow):
-  │     │                                                        │    flow.client.sockname = :51820
+  │     │                                                        │    proxy_mode.listen_port() = 51820
   │     │                                                        │    → sandbox = "ppp-red-bird"
   │     │                                                        │    → policy check (allow api.anthropic.com)
   │     │                                                        │    → secret: UDS query Go parent
@@ -728,9 +728,9 @@ mitmdump process (single):
   WG server :51822 ← ppp-green-owl  (10.0.0.3)  → policy.allow("github.com")        → inject github token
 
 addon sees (identity = receiving WG instance's listen port; inner IP logged but not trusted):
-  flow.client.sockname = :51820 (addr 10.0.0.1)  → sandbox = "ppp-red-bird"   → apply red-bird policy + secrets
-  flow.client.sockname = :51821 (addr 10.0.0.2)  → sandbox = "ppp-blue-fox"    → apply blue-fox policy + secrets
-  flow.client.sockname = :51822 (addr 10.0.0.3)  → sandbox = "ppp-green-owl"   → apply green-owl policy + secrets
+  proxy_mode.listen_port() = 51820 (addr 10.0.0.1)  → sandbox = "ppp-red-bird"   → apply red-bird policy + secrets
+  proxy_mode.listen_port() = 51821 (addr 10.0.0.2)  → sandbox = "ppp-blue-fox"    → apply blue-fox policy + secrets
+  proxy_mode.listen_port() = 51822 (addr 10.0.0.3)  → sandbox = "ppp-green-owl"   → apply green-owl policy + secrets
 
 All flows logged to $PPP_DATA/flows.jsonl with sandbox identified (by port).
 ```
@@ -905,4 +905,7 @@ Concrete walkthrough of mitmproxy WG mode + Podman containers as WG clients (`--
 7. **Single mitmdump blast radius** — if mitmdump crashes, all sandboxes lose their proxy. Mitmproxy is mature and rarely crashes, but for production-grade reliability, consider a supervisor (systemd unit on Linux, launchd plist on macOS, Windows service) that auto-restarts. v1 uses the Go binary as supervisor.
 8. **`10.0.0.1/32` hardcoding workaround fragility** — the `Address =` rewrite relies on the text of mitmproxy's generated client config. If a future mitmproxy version changes the config format, the parser could break. Mitigation: pin the mitmproxy version in `ppp setup` and test against it; use a robust INI parser rather than string replacement. Note that since sandbox *identity* is now keyed on the listen port (§3.1), a wrong `Address` rewrite degrades routing clarity but does not break the security boundary.
 9. **WG endpoint routing loop (RESOLVED in design, needs testing)** — `AllowedIPs = 0.0.0.0/0` would route WG's own datagrams into the tunnel. The provision script (§5.2 step 3) pins an off-tunnel `/32` route to the endpoint via the gvproxy gateway (`192.168.127.1`). Must be validated on each provider (libkrun/gvproxy on macOS, WSL, qemu) — the gateway IP and default-route behavior may differ, especially under `--user-mode-networking` on WSL.
-10. **Sudo agent inner-IP spoofing (MITIGATED)** — a `sudo`-capable agent could reassign its `wg0` address to impersonate another sandbox's inner IP. Resolved by keying identity on `flow.client.sockname` (listen port, cryptographically bound to a per-sandbox keypair) rather than `flow.client.address`. Confirmed via source trace + two-instance mitmdump spike. Residual: the `process_outgoing_packet` "fall back to first peer" path (`wireguard.rs:326-333`) should be exercised under many-sandbox load to confirm no return-path cross-talk.
+10. **Sudo agent inner-IP spoofing (MITIGATED)** — a `sudo`-capable agent could reassign its `wg0` address to impersonate another sandbox's inner IP. Resolved by keying identity on the receiving WireGuard instance's **listen port** (via `flow.client_conn.proxy_mode.listen_port()` on mitmproxy 12.2.3 — **not** `flow.client.sockname`, which is the inner destination on that version), cryptographically bound to a per-sandbox keypair, rather than `flow.client.address`. Confirmed via source trace, a two-instance mitmdump spike, and a live macOS/libkrun end-to-end tunnel with two instances. Residual: the `process_outgoing_packet` "fall back to first peer" path (`wireguard.rs:326-333`) should be exercised under many-sandbox load to confirm no return-path cross-talk.
+11. **WireGuard endpoint host address (RESOLVED via live spike)** — the guest must use the **gvproxy host alias `192.168.127.254`** as the WireGuard `Endpoint`, not the host LAN IP; the LAN-IP path silently drops handshake packets on libkrun. The supervisor rewrites `Endpoint` accordingly.
+12. **mitmdump stdout buffering (impl note)** — mitmdump block-buffers stdout when redirected to a file, so `proxy.log` can stay empty while running; the supervisor must capture via a PTY or set `PYTHONUNBUFFERED=1` to read client-config blocks promptly.
+13. **WireGuard peer public key (impl note)** — the per-port keys file holds *private* keys; the peer **public** key for `wg0.conf` must be taken from the emitted client-config block, or the handshake fails (`InvalidAeadTag`).

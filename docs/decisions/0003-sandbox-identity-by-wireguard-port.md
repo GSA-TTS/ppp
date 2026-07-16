@@ -44,11 +44,20 @@ credential-disclosure risk. We must choose a sandbox identifier that a
 
 ## Decision Outcome
 
-Chosen option: **the WireGuard listen port** (`flow.client.sockname`), because it
-is cryptographically bound to a per-sandbox keypair and cannot be changed by the
-guest, whereas the inner IP is guest-controllable.
+Chosen option: **the WireGuard listen port**, because it is cryptographically
+bound to a per-sandbox keypair and cannot be changed by the guest, whereas the
+inner IP is guest-controllable.
 
-This was verified two ways (`docs/explorations/ppp-spec.md` §3.1):
+> **Accessor correction (verified on mitmproxy 12.2.3 via live e2e spike):** the
+> listen port is obtained from the flow's **proxy mode** —
+> `flow.client_conn.proxy_mode` and its `.listen_port()` / `.full_spec` — **not**
+> from `flow.client.sockname`. On 12.2.3, `sockname` surfaced the inner
+> *destination* address, not the WG server's listen port. The principle is
+> unchanged (identity = the receiving WireGuard instance's listen port); only the
+> Python accessor differs from earlier drafts. A two-instance live tunnel
+> (`:51820`, `:51821`) confirmed distinct, correct per-instance identity.
+
+This was verified (`docs/explorations/ppp-spec.md` §3.1):
 
 - **Source trace:** the decrypted inner IPv4 source address (`packet.src_addr()`
   in `mitmproxy_rs/.../wireguard.rs`) flows through to the addon as
@@ -56,9 +65,9 @@ This was verified two ways (`docs/explorations/ppp-spec.md` §3.1):
   `wg-quick` assigned to the guest's `wg0` — i.e. the `Address =` line — which a
   `sudo` agent can change with `ip addr` to impersonate another sandbox's
   `10.0.0.M`. By contrast, each `--mode wireguard@<port>` binds its own UDP
-  socket, so `dst_addr = socket.local_addr()` (surfaced as `sockname`) reflects
-  which instance received the packet; the guest cannot move its traffic to a
-  different host port without that instance's server private key.
+  socket and its own keypair; the receiving instance is identified by the flow's
+  `proxy_mode` listen port, and the guest cannot move its traffic to a different
+  host port without that instance's server private key.
 - **Live spike:** running two WireGuard instances (`@51820`, `@51821`) in one
   `mitmdump` process, both generated client configs carried the hardcoded
   `Address = 10.0.0.1/32` and differed only by `Endpoint = <ip>:<port>` —
