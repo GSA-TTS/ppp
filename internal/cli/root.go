@@ -14,8 +14,18 @@ import (
 // verbose logging wiring; commands may read it once real behavior lands.
 var debug bool
 
-// NewRootCmd builds the root `ppp` command with all subcommands attached.
+// NewRootCmd builds the root `ppp` command with all subcommands attached,
+// wired over the production dependency set (real PodmanRunner/secret Store/proxy
+// Supervisor). Tests build a root via newRootCmd(deps) with injected fakes.
 func NewRootCmd() *cobra.Command {
+	return newRootCmd(defaultDeps())
+}
+
+// newRootCmd builds the root command over the given dependency set. It is the
+// single seam through which tests inject a podman.Fake, an in-memory secret
+// Store, and a fake Supervisor, so no command touches a real VM, keychain, or
+// proxy process during tests.
+func newRootCmd(d deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "ppp",
 		Short: "Podman Plus Proxy — run AI coding agents in isolated sandboxes",
@@ -30,18 +40,18 @@ sandbox.`,
 
 	root.PersistentFlags().BoolVarP(&debug, "debug", "D", false, "enable debug logging")
 
-	addCommands(root)
+	addCommands(root, d)
 	return root
 }
 
 // addCommands attaches every v1 top-level command to root.
-func addCommands(root *cobra.Command) {
+func addCommands(root *cobra.Command, d deps) {
 	root.AddCommand(
-		newRunCmd(),
-		newCreateCmd(),
+		newRunCmd(d),
+		newCreateCmd(d),
 		newLsCmd(),
-		newStopCmd(),
-		newRmCmd(),
+		newStopCmd(d),
+		newRmCmd(d),
 		newExecCmd(),
 		newCpCmd(),
 		newPortsCmd(),
@@ -50,10 +60,10 @@ func addCommands(root *cobra.Command) {
 		newDiagnoseCmd(),
 		newTuiCmd(),
 		newVersionCmd(),
-		newDaemonCmd(),
+		newDaemonCmd(d),
 		newKitCmd(),
 		newPolicyCmd(),
-		newSecretCmd(),
+		newSecretCmd(d),
 		newTemplateCmd(),
 		newCompletionCmd(root),
 	)

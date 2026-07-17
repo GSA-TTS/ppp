@@ -38,7 +38,7 @@ func roundTrip(t *testing.T, sockPath, request string) []byte {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Write([]byte(request + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
