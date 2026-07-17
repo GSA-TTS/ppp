@@ -196,7 +196,7 @@ func splitEndpoint(endpoint string) (host string, port int, err error) {
 		return "", 0, fmt.Errorf("unparseable Endpoint port in %q: %w", endpoint, err)
 	}
 	if port < 1 || port > 65535 {
-		return "", 0, fmt.Errorf("Endpoint port %d out of range in %q", port, endpoint)
+		return "", 0, fmt.Errorf("endpoint port %d out of range in %q", port, endpoint)
 	}
 	return h, port, nil
 }

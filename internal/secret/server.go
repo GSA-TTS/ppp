@@ -155,7 +155,7 @@ func (s *Server) isClosed() bool {
 // handleConn processes exactly one request/response on conn, then closes it. It
 // never panics: any read/parse/resolve failure becomes a fail-closed response.
 func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	line, err := readLine(conn, maxRequestBytes)
 	if err != nil {
