@@ -38,13 +38,19 @@
 
 FROM ubuntu:26.04
 
-# --- Pinned tool versions (keep in sync with Makefile / CI / ticket #15) ------
+# --- Pinned tool versions ------------------------------------------------------
+# CANONICAL SOURCE: ../versions.env at the repo root. CI sources that file and
+# passes each value as a --build-arg, so a version bump is a one-line edit there.
+# The defaults below are a fallback for a bare `docker build` and MUST be kept
+# equal to versions.env (a mismatch only matters if you build without CI's
+# --build-args). Keep this list and versions.env in lockstep.
 ARG GOIMPORTS_VERSION=v0.48.0
 ARG GOLANGCI_LINT_VERSION=v2.12.2
 ARG GOVULNCHECK_VERSION=v1.1.4
 ARG MITMPROXY_VERSION=12.2.3
 ARG PODMAN_VERSION=6.0.1
 ARG RUFF_VERSION=0.15.22
+ARG PYTEST_VERSION=8.4.2
 ARG GITLEAKS_VERSION=8.30.1
 ARG GH_VERSION=2.96.0
 ARG PRECOMMIT_VERSION=4.6.0
@@ -224,9 +230,11 @@ RUN set -eux; \
     /opt/venv/bin/pip install --no-cache-dir \
         "mitmproxy==${MITMPROXY_VERSION}" \
         "ruff==${RUFF_VERSION}" \
+        "pytest==${PYTEST_VERSION}" \
         "pre-commit==${PRECOMMIT_VERSION}"; \
     mitmdump --version | grep -q "${MITMPROXY_VERSION}"; \
     ruff --version | grep -q "${RUFF_VERSION}"; \
+    pytest --version | grep -q "${PYTEST_VERSION}"; \
     pre-commit --version | grep -q "${PRECOMMIT_VERSION}"; \
     chmod -R a+rX /opt/venv
 

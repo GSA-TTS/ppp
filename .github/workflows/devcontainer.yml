@@ -76,6 +76,17 @@ jobs:
             exit 1
           fi
 
+      - name: Load pinned versions
+        id: versions
+        run: |
+          # versions.env is the single source of truth for pinned versions.
+          # Re-emit each KEY=value as a build-arg line for build-push-action.
+          {
+            echo 'build-args<<EOF'
+            grep -E '^[A-Z_]+=' versions.env
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & push by digest (${{ matrix.platform }})
         id: build
         uses: docker/build-push-action@v6
@@ -85,6 +96,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           # Push by digest only; the tag/manifest is assembled in the merge job.
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: ${{ steps.versions.outputs.build-args }}
           secrets: |
             playbook_token=${{ secrets.PLAYBOOK_TOKEN }}
           provenance: false

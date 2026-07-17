@@ -9,15 +9,10 @@ BIN_DIR  := bin
 BINARY   := $(BIN_DIR)/ppp
 CONTRACT := ./scripts/ensure-contract.sh
 
-# Pinned dev-tool versions (AGENTS.md: no floating ranges). Keep these in sync
-# with the versions installed in .devcontainer (ticket #15 / T2) and CI.
-#   go            1.22.x   (go.mod language floor)
-#   goimports     v0.48.0
-#   golangci-lint v2.12.2
-#   mitmproxy     12.2.3    (ADR-0003/spec pin; WireGuard client-config format)
-#   podman        6.0.x     (client; verified against 6.0.1)
-GOIMPORTS_VERSION    := v0.48.0
-GOLANGCI_LINT_VERSION := v2.12.2
+# Pinned tool versions live in ONE place: versions.env (AGENTS.md: no floating
+# ranges). The Makefile, .devcontainer, and CI all read from it, so a bump is a
+# one-line edit there. See versions.env for the full set + rationale.
+include versions.env
 
 # GOBIN falls back to $(go env GOPATH)/bin so `make setup` can find installed tools.
 GOBIN := $(shell $(GO) env GOBIN)
@@ -25,7 +20,7 @@ ifeq ($(GOBIN),)
 GOBIN := $(shell $(GO) env GOPATH)/bin
 endif
 
-.PHONY: all setup check build test vet fmt-check lint contract clean
+.PHONY: all setup check version-sync build test test-addon vet fmt-check lint contract clean
 
 all: check
 
@@ -52,8 +47,18 @@ setup:
 	@echo ">> setup complete"
 
 ## check: format, vet, lint, test, and verify the behavioral contract.
-check: fmt-check vet lint test contract
+check: version-sync fmt-check vet lint test contract
 	@echo ">> check complete"
+
+## version-sync: fail if go.mod's go directive drifts from versions.env GO_VERSION.
+version-sync:
+	@echo ">> version-sync (go.mod vs versions.env)"
+	@modver=$$(awk '/^go /{print $$2}' go.mod); \
+	want=$$(awk -F= '/^GO_VERSION=/{print $$2}' versions.env); \
+	case "$$modver" in \
+		$$want|$$want.*) : ;; \
+		*) echo "   go.mod 'go $$modver' != versions.env GO_VERSION=$$want"; exit 1 ;; \
+	esac
 
 ## fmt-check: fail if any Go source is not gofmt/goimports-clean.
 fmt-check:
@@ -98,6 +103,28 @@ lint:
 test:
 	@echo ">> go test"
 	$(GO) test ./...
+
+## test-addon: lint + test the embedded Python mitmproxy addon.
+## Requires ruff + pytest with mitmproxy's runtime deps (ruamel.yaml) importable
+## — all preinstalled in the dev container's /opt/venv. On the host, install
+## them into the same environment first. conftest.py puts assets/ on sys.path.
+## PY selects the addon interpreter: the dev-container venv if present, else the
+## first python3 on PATH. Tools are run as `python -m` so they resolve against
+## that interpreter's environment (where ruamel.yaml lives), not a stray PATH copy.
+PY := $(shell [ -x /opt/venv/bin/python ] && echo /opt/venv/bin/python || command -v python3)
+test-addon:
+	@echo ">> ruff check (addon)"
+	@if $(PY) -m ruff --version >/dev/null 2>&1; then \
+		$(PY) -m ruff check assets tests/addon; \
+	else \
+		echo "   ruff not available for $(PY); skipping (use the dev container or 'pip install ruff==$(RUFF_VERSION)')"; \
+	fi
+	@echo ">> pytest (addon)"
+	@if $(PY) -m pytest --version >/dev/null 2>&1; then \
+		$(PY) -m pytest tests/addon; \
+	else \
+		echo "   pytest not available for $(PY); skipping (use the dev container or 'pip install pytest==$(PYTEST_VERSION)')"; \
+	fi
 
 ## build: compile the ppp binary into $(BINARY).
 build:

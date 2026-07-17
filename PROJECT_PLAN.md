@@ -30,7 +30,7 @@ audience: ["developers", "tech-leads", "managers"]
 
 | Component | Choice | Rationale |
 |---|---|---|
-| **Language** | Go 1.22+ (CLI/orchestrator) + embedded Python 3.9+ (mitmproxy addon) | Go for a single static cross-platform binary with a Cobra command tree; Python only where mitmproxy's addon API requires it. |
+| **Language** | Go (CLI/orchestrator) + embedded Python 3.9+ (mitmproxy addon) | Go for a single static cross-platform binary with a Cobra command tree; Python only where mitmproxy's addon API requires it. (Pinned toolchain versions live in `versions.env`.) |
 | **Framework** | Cobra (CLI) + Bubbletea/charmbracelet (TUI for `setup`/`tui`) | Standard Go CLI + TUI stack; matches the `sbx`-style command surface and interactive dashboards. |
 | **Database** | None | State is on-disk under XDG dirs (`sandbox.json`, `port-registry.json`, `flows.jsonl`, YAML policies); secrets in OS keychain / `age` fallback. |
 | **Cloud/Hosting** | None (local developer-workstation tool) | `ppp` runs entirely on the developer's macOS/Windows/Linux host; there is no deployed service. |

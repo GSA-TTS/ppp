@@ -105,7 +105,7 @@ silent, the universal contract governs.
 ## Project Context
 
 - **Description:** `ppp` (Podman Plus Proxy) is a local developer utility — a thin Go CLI plus an embedded Python mitmproxy addon — that runs AI coding agents inside isolated, policy-controlled sandboxes. Each sandbox is a dedicated Podman Machine microVM; all VM egress is transparently tunneled through a single host-side mitmproxy (WireGuard mode) that enforces network policy and injects secrets from the host so credentials never enter the sandbox. It clones the operational surface of Docker's `sbx` (minus `login`/`logout`) by composing mature OSS rather than reimplementing isolation. See `docs/explorations/ppp-spec.md` for the authoritative design.
-- **Language(s):** Go 1.22+ (CLI/orchestrator); Python 3.9+ (embedded mitmproxy addon only).
+- **Language(s):** Go (CLI/orchestrator); Python 3.9+ (embedded mitmproxy addon only). Pinned toolchain versions live in `versions.env` (single source of truth).
 - **Framework(s):** Cobra (CLI command tree); Bubbletea/charmbracelet (TUI for `setup`/`tui`). Shells out to `podman` and `mitmdump`.
 - **Data Classification:** Authentication credentials/secrets (API keys, tokens) are the primary sensitive data; developer workspaces mounted into sandboxes may contain CUI. No production federal data.
 - **ATO Status:** **Not applicable — `ppp` is not a FISMA system.** It is a local developer tool with no deployed service and no ATO boundary. Treated as FIPS Low for posture purposes only.

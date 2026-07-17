@@ -22,23 +22,23 @@ lifecycle are **host-only** (see `docs/explorations/ppp-spec.md`).
 
 ## Pinned tool versions
 
-Every version is pinned exactly (AGENTS.md: *no floating ranges*) and MUST stay
-in sync with the `Makefile` pins, CI, and ticket #15's table:
+Every version is pinned exactly (AGENTS.md: *no floating ranges*). The **single
+source of truth is [`versions.env`](../versions.env)** at the repo root — the
+`Makefile` `include`s it, and CI passes each value to the Docker build as a
+`--build-arg`. To bump a tool, edit `versions.env` (one line) and rebuild; the
+Dockerfile's `ARG` defaults mirror it only as a fallback for a bare
+`docker build` with no `--build-arg`. Two versions are *not* in `versions.env`
+because they come from the base image's package manager:
 
-| Tool | Pinned | Source of truth |
-|---|---|---|
-| Ubuntu | `26.04 LTS` (base image) | ticket #15 base decision |
-| Go | `1.26` (apt `golang-go`) | `go.mod` language floor (≥1.22) |
-| Python | `3.14` (apt `python3`) | ≥3.12 for mitmproxy 12.2.3 |
-| podman (FULL client) | `6.0.1` | Homebrew-on-Linux (pinned core SHA + bottle) |
-| goimports | `v0.48.0` | `Makefile` `GOIMPORTS_VERSION` |
-| golangci-lint | `v2.12.2` (v2 config schema) | `Makefile` `GOLANGCI_LINT_VERSION` |
-| govulncheck | `v1.1.4` | SCA (#29) |
-| mitmproxy | `12.2.3` | ADR-0003 / spec pin (WG client-config format) |
-| ruff | `0.15.22` | Python addon lint (#24) |
-| gitleaks | `8.30.1` | pre-commit secrets scan |
-| gh | `2.96.0` | issue-tracker ops |
-| pre-commit | `4.6.0` | runs contract probe + gitleaks hooks |
+| Tool | Where it comes from |
+|---|---|
+| Ubuntu `26.04 LTS` | base image (`FROM ubuntu:26.04`) |
+| Go | apt `golang-go` (≥ `GO_VERSION` in `versions.env`) |
+| Python | apt `python3` (≥3.12 for mitmproxy) |
+
+Everything else (`podman`, `goimports`, `golangci-lint`, `govulncheck`,
+`mitmproxy`, `ruff`, `pytest`, `gitleaks`, `gh`, `pre-commit`, and the
+`PLAYBOOK_REF` contract tag) is defined once in `versions.env`.
 
 ### How podman 6.0.1 is pinned (Homebrew-on-Linux)
 
