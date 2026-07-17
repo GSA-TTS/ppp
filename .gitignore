@@ -11,3 +11,6 @@ __pycache__/
 
 # Agent session transcripts
 session-*.md
+
+# Git worktrees for parallel ticket work (kept inside the repo/workspace mount)
+.worktrees/
