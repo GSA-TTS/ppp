@@ -21,13 +21,29 @@ func startTestServer(t *testing.T, fs *fakeStore, customs []CustomSecret) (*Serv
 	if customs != nil {
 		r.SetCustom(customs)
 	}
-	sockPath := filepath.Join(t.TempDir(), "secret.sock")
+	sockPath := filepath.Join(shortSocketDir(t), "secret.sock")
 	srv := NewServer(r, sockPath)
 	if err := srv.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = srv.Stop() })
 	return srv, sockPath
+}
+
+// shortSocketDir returns a short-lived temp directory suitable for a Unix domain
+// socket. It deliberately avoids t.TempDir(), whose deeply-nested paths (the
+// test name is embedded) routinely exceed the platform sockaddr_un.sun_path
+// limit (~104 bytes on macOS, ~108 on Linux), which surfaces as a "bind:
+// invalid argument" listen error. Using a short base keeps the full socket path
+// comfortably under the limit on every platform. The dir is removed at test end.
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ppp-sec-")
+	if err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // roundTrip connects to the socket, writes one request line, reads one response

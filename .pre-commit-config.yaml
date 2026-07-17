@@ -11,3 +11,16 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+  # Secrets scan (fail-closed). Honors .gitleaks.toml, which extends the default
+  # ruleset and narrowly allowlists one non-secret test fixture. gitleaks is
+  # preinstalled in the dev container (pinned 8.30.1) and available on the host.
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Detect hardcoded secrets (gitleaks)
+        entry: gitleaks protect --staged --redact --config .gitleaks.toml
+        language: system
+        pass_filenames: false
+        always_run: true
+

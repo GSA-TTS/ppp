@@ -1,0 +1,20 @@
+# gitleaks configuration for ppp.
+#
+# Extends the default gitleaks ruleset and adds a narrowly-scoped allowlist for
+# one test fixture. Everything else is scanned normally.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "ppp allowlisted paths (test fixtures with non-secret key material)"
+paths = [
+  # WireGuard client config captured from a THROWAWAY mitmdump 12.2.3 spike VM
+  # (since destroyed). The two `PrivateKey =` lines are ephemeral, non-secret
+  # WireGuard client keys that mitmproxy generated for that run; they are NOT
+  # real credentials. The fixture must retain them verbatim because the capture
+  # parser test (internal/proxy/capture) asserts that the per-sandbox rewrite
+  # never leaks these private keys into the generated wg0.conf (it must emit the
+  # server PUBLIC key instead — ADR-0003). Scrubbing them would remove the
+  # regression's teeth. Scope is limited to this exact fixture file.
+  '''internal/proxy/capture/testdata/mitmdump-wg-12\.2\.3\.log''',
+]
