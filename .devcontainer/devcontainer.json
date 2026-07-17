@@ -9,7 +9,7 @@
   // publishes a new image (a change under .devcontainer/**), update this digest
   // from the workflow's job summary.
   //   tag: ghcr.io/gsa-tts/ppp-devcontainer:latest
-  "image": "ghcr.io/gsa-tts/ppp-devcontainer@sha256:79f6a41dd66a95f1e1a5113f2be95fe6f2b8fc2aeed6202a8f7437f1b466ffb6",
+  "image": "ghcr.io/gsa-tts/ppp-devcontainer@sha256:403f56c9fed73c52606647f0b555b13ee473ceb43e0139f70aa53ca548e2ad79",
 
   // LOCAL REBUILD / OVERRIDE (uncomment the whole "build" block AND comment out
   // the "image" line above). This builds .devcontainer/Dockerfile locally and
