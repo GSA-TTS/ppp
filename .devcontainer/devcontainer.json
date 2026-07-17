@@ -5,10 +5,11 @@
   // Developers PULL the prebuilt, multi-arch image from GHCR (no local build).
   // CI (.github/workflows/devcontainer.yml) builds + pushes it — passing
   // PLAYBOOK_TOKEN as a BuildKit --secret — and emits the pushed DIGEST in its
-  // job summary. Pin this reference to that digest for reproducibility, e.g.:
-  //   "image": "ghcr.io/gsa-tts/ppp-devcontainer@sha256:<digest-from-CI>"
-  // `:latest` is used here until CI has published the first digest.
-  "image": "ghcr.io/gsa-tts/ppp-devcontainer:latest",
+  // job summary. This reference is PINNED BY DIGEST for reproducibility; when CI
+  // publishes a new image (a change under .devcontainer/**), update this digest
+  // from the workflow's job summary.
+  //   tag: ghcr.io/gsa-tts/ppp-devcontainer:latest
+  "image": "ghcr.io/gsa-tts/ppp-devcontainer@sha256:79f6a41dd66a95f1e1a5113f2be95fe6f2b8fc2aeed6202a8f7437f1b466ffb6",
 
   // LOCAL REBUILD / OVERRIDE (uncomment the whole "build" block AND comment out
   // the "image" line above). This builds .devcontainer/Dockerfile locally and
