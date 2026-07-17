@@ -36,6 +36,7 @@ func TestRuleMatches(t *testing.T) {
 		{name: "regex anchored mismatch", resource: `^api\.(anthropic|openai)\.com$`, target: Target{Host: "api.google.com"}, want: false},
 		{name: "regex no substring match", resource: `example\.com`, target: Target{Host: "notexample.com"}, want: false},
 		{name: "regex char class", resource: `host[0-9]\.example\.com`, target: Target{Host: "host7.example.com"}, want: true},
+		{name: "regex case-insensitive (parity with addon)", resource: `^API[0-9]+\.example\.com$`, target: Target{Host: "api42.example.com"}, want: true},
 
 		{name: "cidr v4 in range", resource: "10.0.0.0/8", target: Target{Host: "10.1.2.3"}, want: true},
 		{name: "cidr v4 out of range", resource: "10.0.0.0/8", target: Target{Host: "11.0.0.1"}, want: false},

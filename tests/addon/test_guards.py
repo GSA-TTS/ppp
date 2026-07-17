@@ -57,6 +57,34 @@ def test_public_ip_not_blocked(tmp_path):
     assert flow.response is None
 
 
+def test_resolution_failure_fails_closed(tmp_path):
+    # A non-IP host whose resolution fails must be blocked, not injected
+    # (code review S5): a malicious guest could otherwise force local resolver
+    # failure to bypass the rebind guard.
+    a = _addon_allow_all(tmp_path, resolver=lambda host: None)
+    flow = FakeFlow(51820, FakeRequest("unknown.example.com"))
+    a.request(flow)
+    assert flow.response is not None
+    assert flow.response.status_code == addon.REBIND_STATUS
+
+
+def test_any_forbidden_record_blocks(tmp_path):
+    # If resolution returns multiple records and ANY is forbidden, block
+    # (code review S5): a mixed public+private answer must not slip through.
+    a = _addon_allow_all(tmp_path, resolver=lambda host: ["93.184.216.34", "169.254.169.254"])
+    flow = FakeFlow(51820, FakeRequest("unknown.example.com"))
+    a.request(flow)
+    assert flow.response is not None
+    assert flow.response.status_code == addon.REBIND_STATUS
+
+
+def test_all_public_records_allowed(tmp_path):
+    a = _addon_allow_all(tmp_path, resolver=lambda host: ["93.184.216.34", "93.184.216.35"])
+    flow = FakeFlow(51820, FakeRequest("unknown.example.com"))
+    a.request(flow)
+    assert flow.response is None
+
+
 def test_request_over_1mb_gets_413(tmp_path):
     a = _addon_allow_all(tmp_path, resolver=lambda host: "93.184.216.34")
     big = b"x" * (1 * 1024 * 1024 + 1)

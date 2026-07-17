@@ -63,3 +63,42 @@ def test_malformed_sandbox_yaml_fails_closed(tmp_path):
     # An unparseable sandbox rule denies the whole sandbox policy; the merged
     # policy therefore has no allow rules and a deny default.
     assert pol.evaluate("x.example", 443)[0] == "deny"
+
+
+def test_unparseable_sandbox_file_denies_not_global_fallback(tmp_path):
+    # A per-sandbox policy that exists but cannot be PARSED at the file level
+    # (invalid YAML) must fail closed for that sandbox, NOT silently fall back
+    # to a permissive global policy (code review S4).
+    data_dir, gp = _write(
+        tmp_path,
+        "s1",
+        sandbox_yaml="default: allow\nrules: [this is : not : valid yaml\n",
+        global_yaml="default: allow\nrules: []\n",
+    )
+    pol = addon.load_policy_for("s1", data_dir, gp)
+    assert pol.evaluate("x.example", 443)[0] == "deny"
+
+
+def test_unparseable_global_file_fails_closed(tmp_path):
+    data_dir, gp = _write(
+        tmp_path,
+        "s1",
+        sandbox_yaml="default: allow\nrules: []\n",
+        global_yaml="default: allow\nrules: [broken : : :\n",
+    )
+    pol = addon.load_policy_for("s1", data_dir, gp)
+    assert pol.evaluate("x.example", 443)[0] == "deny"
+
+
+def test_regex_resource_is_case_insensitive(tmp_path):
+    # Parity with the Go engine: regex host matching is case-insensitive.
+    data_dir, gp = _write(
+        tmp_path,
+        "s1",
+        sandbox_yaml=(
+            "default: block\nrules:\n"
+            "  - id: rx\n    decision: allow\n    resource: '^API[0-9]+\\.example\\.com$'\n"
+        ),
+    )
+    pol = addon.load_policy_for("s1", data_dir, gp)
+    assert pol.evaluate("api42.example.com", 443)[0] == "allow"

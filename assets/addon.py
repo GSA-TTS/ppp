@@ -341,6 +341,30 @@ def _load_yaml_file(path: str) -> object:
         return None
 
 
+# Sentinel: a policy file exists on disk but could not be read/parsed. Distinct
+# from None (file absent), because a *corrupt* per-sandbox policy MUST fail
+# closed (deny that sandbox) rather than silently fall back to a possibly
+# permissive global policy (see code review S4).
+_UNPARSEABLE = object()
+
+
+def _load_policy_doc(path: str) -> object:
+    """Load a policy YAML doc, distinguishing absent from present-but-corrupt.
+
+    Returns None if the file does not exist, _UNPARSEABLE if it exists but
+    cannot be read/parsed (or PyYAML is unavailable), else the parsed object.
+    """
+    if not os.path.exists(path):
+        return None
+    if _yaml is None:
+        return _UNPARSEABLE
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return _yaml.load(fh)
+    except Exception:  # noqa: BLE001 - present but unreadable/unparseable → fail closed
+        return _UNPARSEABLE
+
+
 def load_policy_for(
     sandbox: str,
     data_dir: str,
@@ -351,11 +375,21 @@ def load_policy_for(
     Per-sandbox rules ($PPP_DATA/sandboxes/<name>/policy.yaml) are evaluated
     before the global rules ($PPP_CONFIG/policies.yaml); the sandbox default
     governs when set, else the global default. Any load/parse failure fails
-    closed (deny-all).
+    closed (deny-all). A per-sandbox policy file that exists but cannot be
+    parsed fails closed for THAT sandbox (deny-all) rather than falling back to
+    the global policy, which could be more permissive (code review S4).
     """
     sandbox_path = os.path.join(data_dir, "sandboxes", sandbox, "policy.yaml")
-    sandbox_doc = _load_yaml_file(sandbox_path)
-    global_doc = _load_yaml_file(global_policy_path)
+    sandbox_doc = _load_policy_doc(sandbox_path)
+    global_doc = _load_policy_doc(global_policy_path)
+
+    # A present-but-corrupt sandbox policy denies everything for this sandbox —
+    # never silently inherit the (possibly permissive) global policy.
+    if sandbox_doc is _UNPARSEABLE:
+        return _deny_all()
+    # A corrupt global policy also fails closed.
+    if global_doc is _UNPARSEABLE:
+        return _deny_all()
 
     if sandbox_doc is None and global_doc is None:
         return _deny_all()
@@ -441,17 +475,20 @@ def is_forbidden_ip(ip_str: str) -> bool:
     )
 
 
-def _default_resolver(host: str) -> Optional[str]:
-    """Resolve a host to an IP via getaddrinfo; None on failure (injectable)."""
+def _default_resolver(host: str) -> Optional[List[str]]:
+    """Resolve a host to all its IPs via getaddrinfo; None on failure.
+
+    Returns every resolved address (not just the first) so the rebind guard can
+    reject a response that mixes a public and a private/metadata record (code
+    review S5). None signals resolution failure, which the guard treats as
+    fail-closed for non-IP-literal hosts.
+    """
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError:
         return None
-    for info in infos:
-        sockaddr = info[4]
-        if sockaddr and sockaddr[0]:
-            return sockaddr[0]
-    return None
+    addrs = [info[4][0] for info in infos if info[4] and info[4][0]]
+    return addrs or None
 
 
 # --- Redaction ---------------------------------------------------------------
@@ -501,7 +538,7 @@ class PppAddon:
         self,
         data_dir: Optional[str] = None,
         config_dir: Optional[str] = None,
-        resolver: Optional[Callable[[str], Optional[str]]] = None,
+        resolver: Optional[Callable[[str], "Optional[List[str] | str]"]] = None,
     ) -> None:
         self.data_dir = data_dir or os.environ.get("PPP_DATA", "")
         self.config_dir = config_dir or os.environ.get("PPP_CONFIG", "")
@@ -625,9 +662,11 @@ class PppAddon:
             return
 
         # DNS-rebind guard: reject an allowed host that resolves to a
-        # private/loopback/link-local/metadata IP.
-        resolved = self._resolve(host)
-        if resolved is not None and is_forbidden_ip(resolved):
+        # private/loopback/link-local/metadata IP. Fails CLOSED (code review
+        # S5): a host that is not an IP literal but cannot be resolved is
+        # blocked rather than injected, and ALL resolved records are checked —
+        # any forbidden address blocks the request.
+        if not self._host_is_allowed_by_rebind_guard(host):
             self._block(flow, REBIND_STATUS, "dns rebind blocked")
             self._deny_and_log(flow, sandbox, rule_id)
             return
@@ -635,6 +674,28 @@ class PppAddon:
         self._inject_secret(flow, sandbox, host)
         # An allowed flow is logged once, on response completion (so the log
         # line carries the real upstream status and bytes_in).
+
+    def _host_is_allowed_by_rebind_guard(self, host: str) -> bool:
+        """Return True if host is safe from a DNS-rebind standpoint.
+
+        - An IP literal is checked directly.
+        - A name is resolved; resolution failure fails closed (False).
+        - Every resolved address must be non-forbidden; any private/loopback/
+          link-local/metadata address fails closed.
+        """
+        try:
+            ipaddress.ip_address(host)
+            is_literal = True
+        except ValueError:
+            is_literal = False
+        if is_literal:
+            return not is_forbidden_ip(host)
+        resolved = self._resolve(host)
+        if not resolved:
+            return False  # cannot resolve a name → fail closed
+        if isinstance(resolved, str):  # tolerate a single-string resolver
+            resolved = [resolved]
+        return all(not is_forbidden_ip(ip) for ip in resolved)
 
     def _deny_and_log(self, flow: object, sandbox: str, rule_id: str) -> None:
         """Log a denied flow now and mark it so response() will not re-log it."""
@@ -666,18 +727,20 @@ class PppAddon:
     def _inject_secret(self, flow: object, sandbox: str, host: str) -> None:
         """Query the UDS (cached) and apply the injection/substitutions.
 
-        For a host with a known service, run the service lookup; for any host,
-        also run the custom-substitution path. Strip client-supplied credential
-        headers BEFORE injecting so the agent can never supply/override the key.
+        Custom substitutions run FIRST (over client-supplied headers), THEN the
+        service credential is injected. This ordering ensures a custom
+        substitution can never rewrite the just-injected credential header
+        (code review S2) — the injected value is always the final, authoritative
+        one. Client-supplied credential headers are stripped before injecting so
+        the agent can never supply/override the key.
         """
-        service = host_to_service(host)
+        custom = self._cached_query({"service": "", "sandbox": sandbox, "host": host})
+        self._apply_custom_response(flow, custom, skip=None)
 
+        service = host_to_service(host)
         if service is not None:
             resp = self._cached_query({"service": service, "sandbox": sandbox, "host": host})
             self._apply_service_response(flow, resp)
-
-        custom = self._cached_query({"service": "", "sandbox": sandbox, "host": host})
-        self._apply_custom_response(flow, custom)
 
     def _apply_service_response(self, flow: object, resp: Optional[dict]) -> None:
         if not resp or not resp.get("ok"):
@@ -707,14 +770,22 @@ class PppAddon:
             except (KeyError, AttributeError):
                 continue
 
-    def _apply_custom_response(self, flow: object, resp: Optional[dict]) -> None:
+    def _apply_custom_response(
+        self, flow: object, resp: Optional[dict], skip: Optional[set] = None
+    ) -> None:
         if not resp or not resp.get("ok"):
             return
         subs = resp.get("substitutions")
         if not isinstance(subs, list) or not subs:
             return
+        skip_lower = {s.lower() for s in skip} if skip else set()
         headers = flow.request.headers
         for name in list(headers.keys()):
+            # Never rewrite a header we injected as a credential (defense in
+            # depth; with custom-first ordering the injected header does not yet
+            # exist, but this keeps the invariant explicit).
+            if name.lower() in skip_lower:
+                continue
             original = headers[name]
             replaced = original
             for sub in subs:

@@ -166,7 +166,11 @@ type regexMatcher struct{ re *regexp.Regexp }
 func (m regexMatcher) matchHost(host string) bool { return m.re.MatchString(host) }
 
 func compileRegexMatcher(host string) (hostMatcher, error) {
-	re, err := regexp.Compile(anchor(host))
+	// Case-insensitive ("(?i)") to match DNS host semantics and the glob
+	// matcher (which lowercases both sides). The addon's Python matcher uses
+	// re.IGNORECASE; both engines MUST agree so the runtime enforcer is never
+	// more permissive than the authored policy (see code review S3).
+	re, err := regexp.Compile("(?i)" + anchor(host))
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex resource %q: %w", host, err)
 	}

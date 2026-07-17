@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 // maxRequestBytes bounds a single request line so a client cannot exhaust the
@@ -87,7 +89,26 @@ func (s *Server) Start() error {
 		return errors.New("secret: server already started")
 	}
 
+	// Ensure the socket's parent directory exists and is private (0700) BEFORE
+	// binding. This closes the window between net.Listen (which creates the
+	// socket at the process umask) and the os.Chmod below: even for that brief
+	// moment the socket is unreachable to other local users because its
+	// directory is not traversable by them (code review S1).
+	if dir := filepath.Dir(s.socketPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("secret: create socket dir %q: %w", dir, err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secret: chmod socket dir %q: %w", dir, err)
+		}
+	}
+
+	// Belt-and-suspenders: also tighten the umask so the socket inode itself is
+	// created without group/other bits, making the subsequent Chmod atomic in
+	// effect rather than a widen-then-narrow.
+	oldMask := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", s.socketPath)
+	syscall.Umask(oldMask)
 	if err != nil {
 		return fmt.Errorf("secret: listen on %q: %w", s.socketPath, err)
 	}
