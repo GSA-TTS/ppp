@@ -1,0 +1,24 @@
+[21:43:50.552] ------------------------------------------------------------
+[Interface]
+PrivateKey = nnYdql67wG548AfXuOdEf4jpgILKIVQ5vv3ZNTss5UY=
+Address = 10.0.0.1/32
+DNS = 10.0.0.53
+
+[Peer]
+PublicKey = sq9NmzZr+dpm9uWPu81sCN6T4pb9qDdr2xm+RO10MQs=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 172.17.0.3:51821
+------------------------------------------------------------
+[21:43:50.553] WireGuard server listening at *:51821.
+[21:43:50.553] ------------------------------------------------------------
+[Interface]
+PrivateKey = faRSX8m94cnItIwNRW26B1ad6UOb+DUREsfEHQE/mMw=
+Address = 10.0.0.1/32
+DNS = 10.0.0.53
+
+[Peer]
+PublicKey = 7Id4Kg5mB4fNSomvYT0T5EzkYk8X0QGlO6XKUzNP9V0=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 172.17.0.3:51820
+------------------------------------------------------------
+[21:43:50.553] WireGuard server listening at *:51820.
