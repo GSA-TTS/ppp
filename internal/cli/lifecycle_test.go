@@ -45,6 +45,9 @@ func TestRunStateOnlyInitAndStart(t *testing.T) {
 	testEnv(t)
 	d, h := newHarness()
 
+	// With no daemon-captured client configs, run creates+starts the machine
+	// and surfaces the not-provisioned hint (see hostprovision_test.go for the
+	// provisioned path).
 	out, err := run(t, d, "", "run", "opencode", "/tmp/ws", "--name", "ppp-swift-otter")
 	if err != nil {
 		t.Fatalf("run: %v (out=%q)", err, out)

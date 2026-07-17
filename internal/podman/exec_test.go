@@ -3,55 +3,112 @@ package podman_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/GSA-TTS/ppp/internal/podman"
 )
 
-func TestRunner_ValidatesBeforeNotImplemented(t *testing.T) {
+// shQuote single-quotes a string for safe embedding in the POSIX stub script.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+func itoa(i int) string { return strconv.Itoa(i) }
+
+func TestRunner_ValidatesBeforeExec(t *testing.T) {
 	ctx := context.Background()
 	r := podman.NewRunner()
 
-	// Invalid names must fail with the validation error, NOT ErrNotImplemented:
-	// no un-vetted argv should ever reach exec.
+	// Invalid names must fail with the validation error BEFORE any exec: no
+	// un-vetted argv should ever reach the process boundary (ADR-0001).
 	if err := r.Start(ctx, "podman-machine-default"); !errors.Is(err, podman.ErrDefaultMachine) {
 		t.Errorf("Start(default): expected ErrDefaultMachine, got %v", err)
 	}
 	if err := r.Init(ctx, podman.InitOptions{Name: "myvm"}); !errors.Is(err, podman.ErrInvalidName) {
 		t.Errorf("Init(non-namespaced): expected ErrInvalidName, got %v", err)
 	}
+	if err := r.Cp(ctx, "ppp-a", "", "/b"); err == nil {
+		t.Error("Cp(empty local path): expected validation error, got nil")
+	}
 }
 
-func TestRunner_ValidArgsReturnNotImplemented(t *testing.T) {
-	ctx := context.Background()
-	r := podman.NewRunner()
+// stubPodman writes a fake `podman` executable onto PATH so the Runner's
+// real exec path can be exercised as a unit test — no real podman, no VM.
+// The script echoes the given stdout, writes stderrMsg to stderr, and exits
+// with code. It records the argv it was called with to argvFile.
+func stubPodman(t *testing.T, stdout, stderrMsg string, code int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("stub uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\n" +
+		"printf '%s' \"$*\" > " + shQuote(argvFile) + "\n" +
+		"printf '%s' " + shQuote(stdout) + "\n" +
+		"printf '%s' " + shQuote(stderrMsg) + " >&2\n" +
+		"exit " + itoa(code) + "\n"
+	path := filepath.Join(dir, "podman")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argvFile
+}
 
-	checks := map[string]error{
-		"Init":  r.Init(ctx, podman.InitOptions{Name: "ppp-a"}),
-		"Start": r.Start(ctx, "ppp-a"),
-		"Stop":  r.Stop(ctx, "ppp-a"),
-		"Rm":    r.Rm(ctx, "ppp-a", true),
-		"Cp":    r.Cp(ctx, "ppp-a", "/a", "/b"),
+func TestRunner_ListDecodesStubbedJSON(t *testing.T) {
+	stubPodman(t, `[{"Name":"ppp-a","Running":true,"VMType":"libkrun"}]`, "", 0)
+	ms, err := podman.NewRunner().List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
 	}
-	for name, err := range checks {
-		if !errors.Is(err, podman.ErrNotImplemented) {
-			t.Errorf("%s: expected ErrNotImplemented, got %v", name, err)
-		}
+	if len(ms) != 1 || ms[0].Name != "ppp-a" || !ms[0].Running || ms[0].VMType != "libkrun" {
+		t.Fatalf("List decoded unexpected machines: %+v", ms)
 	}
-	if _, err := r.SSH(ctx, "ppp-a", "ls"); !errors.Is(err, podman.ErrNotImplemented) {
-		t.Errorf("SSH: expected ErrNotImplemented, got %v", err)
+}
+
+func TestRunner_ListEmptyOutputIsNoMachines(t *testing.T) {
+	stubPodman(t, "", "", 0)
+	ms, err := podman.NewRunner().List(context.Background())
+	if err != nil {
+		t.Fatalf("List(empty): %v", err)
 	}
-	if _, err := r.List(ctx); !errors.Is(err, podman.ErrNotImplemented) {
-		t.Errorf("List: expected ErrNotImplemented, got %v", err)
+	if len(ms) != 0 {
+		t.Fatalf("List(empty): expected no machines, got %+v", ms)
 	}
-	if _, err := r.Inspect(ctx, "ppp-a"); !errors.Is(err, podman.ErrNotImplemented) {
-		t.Errorf("Inspect: expected ErrNotImplemented, got %v", err)
+}
+
+func TestRunner_NonZeroExitWrapsStderr(t *testing.T) {
+	stubPodman(t, "", "boom: machine does not exist", 1)
+	err := podman.NewRunner().Start(context.Background(), "ppp-a")
+	if err == nil {
+		t.Fatal("Start: expected error from non-zero exit, got nil")
+	}
+	var ce *podman.CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("Start: expected *CommandError, got %T: %v", err, err)
+	}
+	if ce.Stderr == "" || ce.Argv[0] != "podman" {
+		t.Errorf("CommandError missing detail: %+v", ce)
+	}
+}
+
+func TestRunner_SSHReturnsStdout(t *testing.T) {
+	stubPodman(t, "hello from guest\n", "", 0)
+	out, err := podman.NewRunner().SSH(context.Background(), "ppp-a", "echo", "hi")
+	if err != nil {
+		t.Fatalf("SSH: %v", err)
+	}
+	if string(out) != "hello from guest\n" {
+		t.Errorf("SSH stdout = %q", out)
 	}
 }
 
 func TestRunner_ProviderNonEmpty(t *testing.T) {
-	r := podman.NewRunner()
-	if r.Provider() == "" {
+	if podman.NewRunner().Provider() == "" {
 		t.Error("Runner.Provider returned empty")
 	}
 }

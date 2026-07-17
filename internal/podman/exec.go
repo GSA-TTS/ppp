@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,18 +9,13 @@ import (
 	"os/exec"
 )
 
-// ErrNotImplemented marks the host-only real shell-out behavior that lands in
-// T13. The argv-building logic is fully implemented and tested here; only the
-// actual process execution is deferred.
-var ErrNotImplemented = errors.New("podman: real shell-out not implemented (host-only, T13)")
-
 // Runner is the real PodmanRunner that shells out to the `podman` binary.
 //
-// Argv construction is complete and tested via the exported *Args functions;
-// the process-execution body is host-only and lands in T13. Until then the
-// lifecycle methods build (and validate) their argv, then return
-// ErrNotImplemented so no un-vetted argv is ever executed and tests never
-// spawn a real process.
+// Argv construction lives in the exported *Args functions (fully unit-tested,
+// no process spawned). Each lifecycle method builds and validates its argv,
+// then executes it via runQuiet/runOutput. exec.CommandContext is always given
+// separate arguments — never a shell string — so nothing here is subject to
+// shell interpolation (spec §5.1, ADR-0001).
 type Runner struct {
 	// provider is the provider this runner targets; zero value defaults to
 	// the host autodetected provider via Provider().
@@ -32,6 +28,12 @@ func NewRunner() *Runner {
 	return &Runner{provider: DetectProvider()}
 }
 
+// NewRunnerWithProvider returns a Runner that names the given provider
+// explicitly (validated when it reaches argv, e.g. in InitArgs).
+func NewRunnerWithProvider(p Provider) *Runner {
+	return &Runner{provider: p}
+}
+
 // Provider reports the provider this runner targets.
 func (r *Runner) Provider() Provider {
 	if r.provider == "" {
@@ -40,67 +42,136 @@ func (r *Runner) Provider() Provider {
 	return r.provider
 }
 
-func (r *Runner) Init(_ context.Context, opts InitOptions) error {
-	if _, err := InitArgs(opts); err != nil {
-		return err
-	}
-	return ErrNotImplemented
+// CommandError carries the failing argv and captured stderr so callers (and
+// `ppp diagnose`) can see exactly what podman was asked to do and why it failed.
+// It deliberately does not include stdout, which may be large.
+type CommandError struct {
+	Argv   []string
+	Err    error
+	Stderr string
 }
 
-func (r *Runner) Start(_ context.Context, name string) error {
-	if _, err := StartArgs(name); err != nil {
-		return err
+func (e *CommandError) Error() string {
+	// Argv[0:3] is the stable "podman machine <verb>" prefix; include the full
+	// argv for actionable diagnostics. Stderr is trimmed by the caller.
+	msg := fmt.Sprintf("podman: command failed: %v: %v", e.Argv, e.Err)
+	if e.Stderr != "" {
+		msg += "\nstderr: " + e.Stderr
 	}
-	return ErrNotImplemented
+	return msg
 }
 
-func (r *Runner) Stop(_ context.Context, name string) error {
-	if _, err := StopArgs(name); err != nil {
-		return err
-	}
-	return ErrNotImplemented
-}
+func (e *CommandError) Unwrap() error { return e.Err }
 
-func (r *Runner) Rm(_ context.Context, name string, force bool) error {
-	if _, err := RmArgs(name, force); err != nil {
-		return err
-	}
-	return ErrNotImplemented
-}
-
-func (r *Runner) SSH(_ context.Context, name string, command ...string) ([]byte, error) {
-	if _, err := SSHArgs(name, command...); err != nil {
+// runOutput executes argv and returns its stdout. stderr is captured separately
+// and, on failure, wrapped into a CommandError so it never contaminates the
+// stdout a caller parses (e.g. JSON from `machine list`).
+func (r *Runner) runOutput(ctx context.Context, argv []string) ([]byte, error) {
+	cmd, err := command(ctx, argv)
+	if err != nil {
 		return nil, err
 	}
-	return nil, ErrNotImplemented
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, &CommandError{Argv: argv, Err: err, Stderr: trimStderr(stderr.String())}
+	}
+	return stdout.Bytes(), nil
 }
 
-func (r *Runner) Cp(_ context.Context, name, localPath, remotePath string) error {
-	if _, err := CpArgs(name, localPath, remotePath); err != nil {
+// runQuiet executes argv and discards stdout, returning only an error. Used for
+// lifecycle verbs (init/start/stop/rm/cp) whose stdout is not consumed.
+func (r *Runner) runQuiet(ctx context.Context, argv []string) error {
+	_, err := r.runOutput(ctx, argv)
+	return err
+}
+
+// trimStderr bounds captured stderr so a runaway podman error cannot bloat an
+// error value or a diagnostic log.
+func trimStderr(s string) string {
+	const max = 4096
+	if len(s) > max {
+		return s[:max] + "…(truncated)"
+	}
+	return s
+}
+
+func (r *Runner) Init(ctx context.Context, opts InitOptions) error {
+	argv, err := InitArgs(opts)
+	if err != nil {
 		return err
 	}
-	return ErrNotImplemented
+	return r.runQuiet(ctx, argv)
 }
 
-func (r *Runner) List(_ context.Context) ([]Machine, error) {
-	_ = ListArgs()
-	return nil, ErrNotImplemented
+func (r *Runner) Start(ctx context.Context, name string) error {
+	argv, err := StartArgs(name)
+	if err != nil {
+		return err
+	}
+	return r.runQuiet(ctx, argv)
 }
 
-func (r *Runner) Inspect(_ context.Context, name string) ([]byte, error) {
-	if _, err := InspectArgs(name); err != nil {
+func (r *Runner) Stop(ctx context.Context, name string) error {
+	argv, err := StopArgs(name)
+	if err != nil {
+		return err
+	}
+	return r.runQuiet(ctx, argv)
+}
+
+func (r *Runner) Rm(ctx context.Context, name string, force bool) error {
+	argv, err := RmArgs(name, force)
+	if err != nil {
+		return err
+	}
+	return r.runQuiet(ctx, argv)
+}
+
+func (r *Runner) SSH(ctx context.Context, name string, command ...string) ([]byte, error) {
+	argv, err := SSHArgs(name, command...)
+	if err != nil {
 		return nil, err
 	}
-	return nil, ErrNotImplemented
+	return r.runOutput(ctx, argv)
 }
 
-// command builds the *exec.Cmd the real (T13) implementation will run. It is
-// the single point where argv becomes a process: exec.Command(argv[0],
-// argv[1:]...) — separate args, never a shell string. Present now so the argv
-// contract and the exec shape are co-located; not invoked by tests.
+func (r *Runner) Cp(ctx context.Context, name, localPath, remotePath string) error {
+	argv, err := CpArgs(name, localPath, remotePath)
+	if err != nil {
+		return err
+	}
+	return r.runQuiet(ctx, argv)
+}
+
+func (r *Runner) List(ctx context.Context) ([]Machine, error) {
+	out, err := r.runOutput(ctx, ListArgs())
+	if err != nil {
+		return nil, err
+	}
+	// `podman machine list --format json` prints `[]` (or nothing on some
+	// versions) when there are no machines; treat empty output as no machines.
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, nil
+	}
+	return decodeMachines(out)
+}
+
+func (r *Runner) Inspect(ctx context.Context, name string) ([]byte, error) {
+	argv, err := InspectArgs(name)
+	if err != nil {
+		return nil, err
+	}
+	return r.runOutput(ctx, argv)
+}
+
+// command builds the *exec.Cmd used to run an argv. It is the single point
+// where argv becomes a process: exec.CommandContext(argv[0], argv[1:]...) —
+// separate args, never a shell string.
 func command(ctx context.Context, argv []string) (*exec.Cmd, error) {
 	if len(argv) == 0 {
-		return nil, fmt.Errorf("podman: empty argv")
+		return nil, errors.New("podman: empty argv")
 	}
 	return exec.CommandContext(ctx, argv[0], argv[1:]...), nil
 }
