@@ -122,9 +122,16 @@ func runProvision(ctx context.Context, runner podman.PodmanRunner, box sandbox.S
 	if err != nil {
 		return err
 	}
+	// The agent image ref is forwarded to the guest login shell (podman machine
+	// ssh re-parses argv), so validate it can't inject even though it is a ppp
+	// constant today (defense in depth; BLOCKER-1 hardening).
+	if err := guestArg("agent image", ag.DefaultImage); err != nil {
+		return err
+	}
 	// sudo -E bash /tmp/provision.sh, with PPP_* exported. Each token is a
 	// separate argv element (no shell string); the guest's sudo runs the script
-	// as root and the leading VAR=VALUE assignments set the script's env.
+	// as root and the leading VAR=VALUE assignments set the script's env. The
+	// fixed config path and the validated image ref carry no shell metacharacters.
 	cmd := []string{
 		"sudo",
 		"PPP_WG_CONF=/tmp/ppp-wg0.conf",
@@ -145,6 +152,20 @@ func runAgent(ctx context.Context, runner podman.PodmanRunner, box sandbox.Sandb
 	ag, err := agent.Lookup(box.Agent)
 	if err != nil {
 		return err
+	}
+	// Both the image ref and the workspace path are forwarded to the guest
+	// login shell; validate them (workspace was validated at ingress too, but
+	// re-check at the point of use so this function is safe on any caller path).
+	if err := guestArg("agent image", ag.DefaultImage); err != nil {
+		return err
+	}
+	if err := validateWorkspacePath(box.Workspace); err != nil {
+		return err
+	}
+	for _, a := range agentArgs {
+		if err := guestArg("agent arg", a); err != nil {
+			return err
+		}
 	}
 	inner := ag.InteractiveArgs(agentArgs)
 	// podman run -i -t -v <ws>:/workspace --workdir /workspace <image> <agent...>

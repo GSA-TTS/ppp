@@ -103,23 +103,24 @@ bring_up_tunnel() {
 	ip route replace default dev wg0
 }
 
-# 4. Wait for the tunnel handshake to complete.
+# 4. Wait for the tunnel handshake to complete. Fails CLOSED: if no handshake is
+#    confirmed within the window, exit non-zero so a dead tunnel never looks
+#    provisioned (the caller sees the failure and can diagnose/retry).
 wait_for_tunnel() {
 	local i
 	for i in $(seq 1 30); do
 		: "$i" # counter only; loop body polls the tunnel state
 		if wg show wg0 >/dev/null 2>&1; then
-			# A completed handshake shows a non-zero latest-handshake.
-			if wg show wg0 latest-handshakes 2>/dev/null | awk '{exit ($2>0)?0:1}'; then
+			# A completed handshake shows a peer row with a non-zero time.
+			if [ -n "$(wg show wg0 latest-handshakes 2>/dev/null | awk '$2 > 0 {print}')" ]; then
 				log "tunnel handshake established"
 				return 0
 			fi
 		fi
 		sleep 1
 	done
-	# wg0 is up even if we could not confirm a handshake within the window;
-	# proceed (the CA fetch below will surface a hard failure if egress is dead).
-	log "warning: no confirmed handshake after 30s; continuing"
+	log "error: no WireGuard handshake after 30s; tunnel is not healthy"
+	return 1
 }
 
 # 5. Trust the mitmproxy CA. Must run AFTER the tunnel is up (mitm.it is a magic

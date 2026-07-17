@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,10 +77,13 @@ func TestVersionMatches(t *testing.T) {
 }
 
 func TestWaitForConfigsTimesOut(t *testing.T) {
-	buf := &syncBuffer{}
-	_, _ = buf.Write([]byte("nothing resembling a config here\n"))
-	// want 1 config, but the buffer has none → should time out quickly.
-	_, err := waitForConfigs(t.Context(), buf, 1, 100*time.Millisecond)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "proxy.log")
+	if err := os.WriteFile(logPath, []byte("nothing resembling a config here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// want 1 config, but the log has none → should time out quickly.
+	_, err := waitForConfigs(t.Context(), logPath, 1, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -88,9 +93,12 @@ func TestWaitForConfigsTimesOut(t *testing.T) {
 }
 
 func TestWaitForConfigsSucceedsOnCapturedBlock(t *testing.T) {
-	buf := &syncBuffer{}
-	_, _ = buf.Write([]byte(sampleBlock))
-	cfgs, err := waitForConfigs(t.Context(), buf, 1, 2*time.Second)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "proxy.log")
+	if err := os.WriteFile(logPath, []byte(sampleBlock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgs, err := waitForConfigs(t.Context(), logPath, 1, 2*time.Second)
 	if err != nil {
 		t.Fatalf("waitForConfigs: %v", err)
 	}

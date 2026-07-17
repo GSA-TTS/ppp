@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +27,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/creack/pty"
 
 	"github.com/GSA-TTS/ppp/internal/proxy/capture"
 )
@@ -69,7 +66,6 @@ type Supervisor struct {
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
-	ptmx    *os.File
 	logFile *os.File
 	done    chan struct{}
 }
@@ -147,8 +143,17 @@ func versionMatches(out, want string) bool {
 
 // Start spawns mitmdump under a PTY, tees output to proxy.log, writes the PID
 // file, and waits until every port's client config has been captured. It
-// returns the parsed configs (indexed by their own Endpoint port). Host-only:
-// requires mitmdump on PATH.
+// Start spawns mitmdump as a DETACHED daemon (its own session, via Setsid),
+// writing its combined stdout/stderr straight to proxy.log, writes the PID
+// file, and waits until every port's client config has been captured by
+// tailing proxy.log. It returns the parsed configs (indexed by their own
+// Endpoint port). Because the child is detached and writes to the log file
+// directly, it keeps running after the launching `ppp daemon start` process
+// exits (spec §5.8/§6.15). Host-only: requires mitmdump on PATH.
+//
+// PYTHONUNBUFFERED=1 defeats Python's block-buffering to the (non-tty) file so
+// the client-config blocks appear promptly without needing a PTY that would
+// tie the child's controlling terminal to the ephemeral CLI process.
 func (s *Supervisor) Start(ctx context.Context) ([]capture.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,30 +170,31 @@ func (s *Supervisor) Start(ctx context.Context) ([]capture.Config, error) {
 	}
 
 	argv := s.buildArgs()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	// PYTHONUNBUFFERED is belt-and-suspenders alongside the PTY so Python's own
-	// buffering never withholds the client-config blocks.
+	// Deliberately NOT exec.CommandContext: the daemon must outlive this CLI
+	// invocation, so its lifetime is not bound to ctx. ctx still bounds the
+	// readiness wait below.
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	// Detach into its own session so closing the CLI's controlling terminal
+	// does not SIGHUP the daemon.
+	cmd.SysProcAttr = detachSysProcAttr()
 
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
+	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return nil, fmt.Errorf("supervisor: starting mitmdump under pty: %w", err)
+		return nil, fmt.Errorf("supervisor: starting mitmdump: %w", err)
 	}
 
 	s.cmd = cmd
-	s.ptmx = ptmx
 	s.logFile = logFile
 	s.done = make(chan struct{})
-
-	// Capture the PTY output: tee to the log file and to a buffer we scan for
-	// the client-config blocks. A pipe carries the accumulated bytes to the
-	// reader goroutine's consumer.
-	captured := &syncBuffer{}
+	// Reap the child if it exits while this process is still alive (avoids a
+	// zombie); harmless once we've detached.
 	go func() {
 		defer close(s.done)
-		mw := io.MultiWriter(logFile, captured)
-		_, _ = io.Copy(mw, ptmx) // ends when the process exits / PTY closes
+		_ = cmd.Wait()
 	}()
 
 	if err := s.writePID(cmd.Process.Pid); err != nil {
@@ -196,7 +202,7 @@ func (s *Supervisor) Start(ctx context.Context) ([]capture.Config, error) {
 		return nil, err
 	}
 
-	cfgs, err := waitForConfigs(ctx, captured, len(s.cfg.Ports), s.cfg.ReadyTimeout)
+	cfgs, err := waitForConfigs(ctx, s.logPath(), len(s.cfg.Ports), s.cfg.ReadyTimeout)
 	if err != nil {
 		_ = s.stopLocked()
 		return nil, err
@@ -233,22 +239,25 @@ func (s *Supervisor) writeClientConfigs(cfgs []capture.Config) error {
 	return nil
 }
 
-// waitForConfigs polls the captured output until capture.Parse finds at least
-// want blocks or the timeout elapses.
-func waitForConfigs(ctx context.Context, buf *syncBuffer, want int, timeout time.Duration) ([]capture.Config, error) {
+// waitForConfigs polls the growing proxy.log until capture.Parse finds at least
+// want blocks or the timeout elapses. It reads the log file (the detached child
+// writes there directly), so it does not depend on holding the child's pipe.
+func waitForConfigs(ctx context.Context, logPath string, want int, timeout time.Duration) ([]capture.Config, error) {
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if cfgs, err := capture.Parse(buf.Bytes()); err == nil && len(cfgs) >= want {
+		data, _ := os.ReadFile(logPath) // best-effort; may not exist for a tick
+		if cfgs, err := capture.Parse(data); err == nil && len(cfgs) >= want {
 			return cfgs, nil
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-deadline:
+			data, _ := os.ReadFile(logPath)
 			return nil, fmt.Errorf("supervisor: timed out after %s waiting for %d client configs (got output:\n%s)",
-				timeout, want, tail(buf.Bytes(), 2048))
+				timeout, want, tail(data, 2048))
 		case <-ticker.C:
 		}
 	}
@@ -280,17 +289,14 @@ func (s *Supervisor) stopLocked() error {
 			firstErr = err
 		}
 	}
-	if s.ptmx != nil {
-		_ = s.ptmx.Close()
-	}
 	if s.done != nil {
-		<-s.done // wait for the copy goroutine to drain
+		<-s.done // wait for the Wait() goroutine to reap the child
 	}
 	if s.logFile != nil {
 		_ = s.logFile.Close()
 	}
 	_ = os.Remove(s.pidPath())
-	s.cmd, s.ptmx, s.logFile, s.done = nil, nil, nil, nil
+	s.cmd, s.logFile, s.done = nil, nil, nil
 	return firstErr
 }
 
@@ -300,26 +306,4 @@ func tail(b []byte, n int) string {
 		return string(b)
 	}
 	return "…" + string(b[len(b)-n:])
-}
-
-// syncBuffer is a minimal concurrency-safe byte buffer: the copy goroutine
-// writes, the poll loop reads a snapshot.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.buf = append(b.buf, p...)
-	return len(p), nil
-}
-
-func (b *syncBuffer) Bytes() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]byte, len(b.buf))
-	copy(out, b.buf)
-	return out
 }

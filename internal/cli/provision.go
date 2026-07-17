@@ -45,8 +45,8 @@ func provisionSandbox(runner podman.PodmanRunner, opts createOptions, start bool
 	if opts.agent != "opencode" {
 		return sandbox.Sandbox{}, fmt.Errorf("agent %q not supported in this version (v1: opencode only)", opts.agent)
 	}
-	if opts.workspace == "" {
-		return sandbox.Sandbox{}, fmt.Errorf("a workspace path is required")
+	if err := validateWorkspacePath(opts.workspace); err != nil {
+		return sandbox.Sandbox{}, err
 	}
 
 	name, err := resolveName(opts.name)
