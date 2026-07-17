@@ -118,7 +118,11 @@ silent, the universal contract governs.
 <!-- The universal contract covers AI self-identification and audit logging.
      Record only project-specific attribution details here. -->
 
-- **Commit attribution:** AI-authored or AI-assisted commits are authored under the human developer's git identity; PR descriptions and/or commit bodies SHOULD disclose AI involvement per the universal contract §2. **Do NOT add a `Co-authored-by:` trailer for the AI agent** — there is no official OpenCode bot account, and a bare `opencode@users.noreply.github.com` trailer misattributes the commit to an unrelated GitHub user who happens to own the `opencode` username. Disclose AI involvement in prose instead.
+- **Commit attribution:** AI-authored or AI-assisted commits are authored under the human developer's git identity; PR descriptions and/or commit bodies SHOULD disclose AI involvement per the universal contract §2. Disclose it **in prose only** (e.g. "Implemented with AI assistance under human review"). Specifically, to avoid misattributing commits to unrelated GitHub accounts:
+  - **Do NOT add a `Co-authored-by:` trailer for the AI agent.** There is no official OpenCode bot account; a bare `opencode@users.noreply.github.com` (or similar) trailer credits an unrelated GitHub user who happens to own that username, and it registers that account as a repo *contributor*.
+  - **Do NOT use an `@`-style mention** (e.g. `@opencode`) in commit messages, PR descriptions, or issue/comment bodies — GitHub linkifies `@handle` to whatever account owns it. Write the agent's name as plain text (`OpenCode`), never `@OpenCode`.
+  - The commit **author and committer must be the human developer's real git identity** (name + verified email), never an agent identity.
+  - If a stray contributor ever appears on GitHub with clean git data (no trailer, human author/committer), it is a stale contributor-graph cache — verify via `gh api repos/<owner>/<repo>/contributors` before considering any history rewrite; do not force-push over a cosmetic cache artifact.
 - **Audit log location / format:** No project-specific mandate beyond the universal contract; standard git history + PR record is the audit trail. (Do not confuse with the `ppp` *runtime's* flow log at `$PPP_DATA/flows.jsonl`, which is a product artifact, not a dev-audit log.)
 
 ---
