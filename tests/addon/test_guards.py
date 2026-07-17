@@ -9,7 +9,7 @@ from fakes import FakeFlow, FakeRequest, FakeResponse
 
 
 def _addon_allow_all(tmp_path, resolver):
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "ppp-red-bird"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "ppp-red-bird", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "ppp-red-bird"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text("default: allow\nrules: []\n")

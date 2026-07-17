@@ -110,10 +110,15 @@ func TestRewriteProducesWgConf(t *testing.T) {
 	if strings.Contains(out, ":51821") {
 		t.Errorf("Rewrite for :51820 leaked the other port :51821\n---\n%s", out)
 	}
-	// The private key from the capture must not survive into wg0.conf: it is
-	// the client's private key generated on the guest, not the server's.
-	if strings.Contains(out, "nnYdql") || strings.Contains(out, "faRSX8") {
-		t.Errorf("Rewrite output leaked a captured PrivateKey\n---\n%s", out)
+	// The client PrivateKey for THIS port's block must be carried into wg0.conf
+	// (the guest authenticates as it; without it the handshake is rejected).
+	// The block whose Endpoint is :51820 has client key faRSX8m...
+	if !strings.Contains(out, "PrivateKey = faRSX8m94cnItIwNRW26B1ad6UOb+DUREsfEHQE/mMw=") {
+		t.Errorf("Rewrite output missing this port's client PrivateKey\n---\n%s", out)
+	}
+	// The OTHER instance's client key (from the :51821 block) must not appear.
+	if strings.Contains(out, "nnYdql67wG548AfXuOdEf4jpgILKIVQ5vv3ZNTss5UY=") {
+		t.Errorf("Rewrite for :51820 leaked the other block's PrivateKey\n---\n%s", out)
 	}
 }
 

@@ -109,7 +109,7 @@ def test_denied_flow_gets_403_and_no_injection(tmp_path):
 
     from fakes import FakeFlow, FakeRequest
 
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "s1"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "s1", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "s1"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text("default: block\nrules: []\n")

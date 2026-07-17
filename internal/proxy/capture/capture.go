@@ -28,9 +28,14 @@ type Config struct {
 	ListenPort int
 	// Address is the client tunnel address as emitted (e.g. "10.0.0.1/32").
 	Address string
+	// PrivateKey is the [Interface] PrivateKey — the CLIENT's private key the
+	// guest authenticates as. It MUST be carried into the rewritten wg0.conf:
+	// without it wg-quick generates a random key and the mitmproxy server
+	// rejects the handshake (InvalidPacket). It is the guest's own key, not a
+	// server secret, so retaining it does not leak server key material.
+	PrivateKey string
 	// PublicKey is the [Peer] PublicKey — the SERVER public key the guest must
-	// use. (The [Interface] PrivateKey in the capture is the client key and is
-	// intentionally not retained.)
+	// use.
 	PublicKey string
 	// EndpointHost is the host portion of the emitted Endpoint (rewritten away).
 	EndpointHost string
@@ -136,6 +141,10 @@ func parseBlock(body []string) (Config, error) {
 	if !ok {
 		return Config{}, fmt.Errorf("missing Address field")
 	}
+	privateKey, ok := fields["PrivateKey"]
+	if !ok {
+		return Config{}, fmt.Errorf("missing PrivateKey field")
+	}
 	publicKey, ok := fields["PublicKey"]
 	if !ok {
 		return Config{}, fmt.Errorf("missing PublicKey field")
@@ -151,6 +160,7 @@ func parseBlock(body []string) (Config, error) {
 	return Config{
 		ListenPort:   port,
 		Address:      address,
+		PrivateKey:   privateKey,
 		PublicKey:    publicKey,
 		EndpointHost: host,
 		AllowedIPs:   fields["AllowedIPs"],
@@ -202,10 +212,12 @@ func splitEndpoint(endpoint string) (host string, port int, err error) {
 }
 
 // Rewrite renders the guest's wg0.conf for a sandbox whose inner-IP octet is N
-// (10.0.0.N). It sets the Address to 10.0.0.N/32, points the Endpoint at the
-// gvproxy host alias while preserving the listen port, adds Table = off, and
-// omits the DNS line entirely (ADR-0005). The peer public key comes from the
-// parsed block and is never invented.
+// (10.0.0.N). It carries the client PrivateKey through unchanged (the guest must
+// authenticate as the key mitmproxy expects — omitting it makes wg-quick invent
+// a random key and the server rejects the handshake), sets the Address to
+// 10.0.0.N/32, points the Endpoint at the gvproxy host alias while preserving
+// the listen port, adds Table = off, and omits the DNS line entirely (ADR-0005).
+// The peer public key comes from the parsed block and is never invented.
 func (c Config) Rewrite(innerIPOctet int) (string, error) {
 	if innerIPOctet < 1 || innerIPOctet > 255 {
 		return "", fmt.Errorf("capture: inner-IP octet %d out of range [1,255]", innerIPOctet)
@@ -213,12 +225,16 @@ func (c Config) Rewrite(innerIPOctet int) (string, error) {
 	if c.PublicKey == "" || c.ListenPort == 0 {
 		return "", fmt.Errorf("capture: Rewrite on incomplete Config (port=%d)", c.ListenPort)
 	}
+	if c.PrivateKey == "" {
+		return "", fmt.Errorf("capture: Rewrite on Config missing client PrivateKey (port=%d)", c.ListenPort)
+	}
 	allowedIPs := c.AllowedIPs
 	if allowedIPs == "" {
 		allowedIPs = "0.0.0.0/0"
 	}
 	var b strings.Builder
 	fmt.Fprintln(&b, "[Interface]")
+	fmt.Fprintf(&b, "PrivateKey = %s\n", c.PrivateKey)
 	fmt.Fprintf(&b, "Address = 10.0.0.%d/32\n", innerIPOctet)
 	fmt.Fprintln(&b, "Table = off")
 	fmt.Fprintln(&b)

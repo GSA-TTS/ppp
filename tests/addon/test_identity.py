@@ -5,14 +5,13 @@ from __future__ import annotations
 import os
 
 import addon
+from conftest import port_registry
 from fakes import FakeClient, FakeFlow, FakeRequest
 
 
 def _make_addon(tmp_path, port_map):
     reg = tmp_path / "port-registry.json"
-    import json
-
-    reg.write_text(json.dumps(port_map))
+    reg.write_text(port_registry(port_map))
     a = addon.PppAddon(data_dir=str(tmp_path), config_dir=str(tmp_path))
     a.reload()
     return a
@@ -44,7 +43,7 @@ def test_string_and_int_port_keys_tolerated(tmp_path):
     import json
 
     reg = tmp_path / "port-registry.json"
-    reg.write_text(json.dumps({"51820": "ppp-red-bird"}))
+    reg.write_text(json.dumps({"ports": {"51820": {"sandbox": "ppp-red-bird", "state": "active"}}}))
     a = addon.PppAddon(data_dir=str(tmp_path), config_dir=str(tmp_path))
     a.reload()
     assert a._port_map[51820] == "ppp-red-bird"
@@ -54,6 +53,22 @@ def test_missing_registry_denies_all_ports(tmp_path):
     a = addon.PppAddon(data_dir=str(tmp_path), config_dir=str(tmp_path))
     a.reload()
     assert a.sandbox_for(FakeFlow(51820, FakeRequest("x"))) is None
+
+
+def test_removing_tombstone_fails_closed(tmp_path):
+    # A port whose entry is a "removing" tombstone must NOT resolve to a sandbox
+    # (the sandbox is being torn down); the port fails closed as unknown.
+    import json
+
+    reg = tmp_path / "port-registry.json"
+    reg.write_text(json.dumps({"ports": {
+        "51820": {"sandbox": "ppp-red-bird", "state": "active"},
+        "51821": {"sandbox": "ppp-going-away", "state": "removing"},
+    }}))
+    a = addon.PppAddon(data_dir=str(tmp_path), config_dir=str(tmp_path))
+    a.reload()
+    assert a.sandbox_for(FakeFlow(51820, FakeRequest("x"))) == "ppp-red-bird"
+    assert a.sandbox_for(FakeFlow(51821, FakeRequest("x"))) is None
 
 
 def test_unreadable_listen_port_fails_closed(tmp_path):

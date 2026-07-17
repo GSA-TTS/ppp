@@ -6,15 +6,21 @@
 useDefault = true
 
 [allowlist]
-description = "ppp allowlisted paths (test fixtures with non-secret key material)"
+description = "ppp allowlisted test fixtures / assertions with non-secret WG key material"
 paths = [
   # WireGuard client config captured from a THROWAWAY mitmdump 12.2.3 spike VM
   # (since destroyed). The two `PrivateKey =` lines are ephemeral, non-secret
   # WireGuard client keys that mitmproxy generated for that run; they are NOT
   # real credentials. The fixture must retain them verbatim because the capture
-  # parser test (internal/proxy/capture) asserts that the per-sandbox rewrite
-  # never leaks these private keys into the generated wg0.conf (it must emit the
-  # server PUBLIC key instead — ADR-0003). Scrubbing them would remove the
-  # regression's teeth. Scope is limited to this exact fixture file.
+  # parser test (internal/proxy/capture) asserts the per-sandbox rewrite carries
+  # the CLIENT private key through (the guest authenticates as it) while never
+  # leaking the OTHER instance's key. Scope limited to this exact fixture file.
   '''internal/proxy/capture/testdata/mitmdump-wg-12\.2\.3\.log''',
+]
+# The capture parser test asserts on those same two throwaway keys by value
+# (it checks the correct client key is carried through and the other is not).
+# Allowlist those exact ephemeral strings rather than exempting the whole file.
+regexes = [
+  '''faRSX8m94cnItIwNRW26B1ad6UOb\+DUREsfEHQE/mMw=''',
+  '''nnYdql67wG548AfXuOdEf4jpgILKIVQ5vv3ZNTss5UY=''',
 ]

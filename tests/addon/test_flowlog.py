@@ -9,7 +9,7 @@ from fakes import FakeFlow, FakeRequest, FakeResponse
 
 
 def _addon(tmp_path, policy="default: block\nrules: []\n", resolver=None):
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "s1"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "s1", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "s1"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text(policy)

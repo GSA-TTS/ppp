@@ -9,7 +9,7 @@ from fakes import FakeFlow, FakeRequest, FakeResponse, FakeUdsServer
 
 
 def test_flow_log_has_fields_and_no_secret(tmp_path):
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "ppp-red-bird"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "ppp-red-bird", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "ppp-red-bird"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text("default: allow\nrules: []\n")

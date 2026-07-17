@@ -581,9 +581,13 @@ class PppAddon:
     def _load_port_registry(self) -> Dict[int, str]:
         """Load {port:int -> sandbox} from port-registry.json (tolerant keys).
 
-        Keys may be JSON strings or ints; both are coerced to int. Any
-        read/parse failure yields an empty map, so every port fails closed as
-        an unknown sandbox until the registry is valid.
+        The file shape written by the Go port pool is:
+            {"ports": {"<port>": {"sandbox": "<name>", "state": "active"|...}}}
+        Only entries whose state is active (or unset) map a port to its sandbox;
+        a "removing" tombstone is treated as not-yet-a-sandbox (fail closed).
+        Keys may be JSON strings or ints. Any read/parse failure yields an empty
+        map, so every port fails closed as an unknown sandbox until the registry
+        is valid.
         """
         try:
             with open(self.port_registry_path, "r", encoding="utf-8") as fh:
@@ -592,15 +596,35 @@ class PppAddon:
             return {}
         if not isinstance(raw, dict):
             return {}
+        ports = raw.get("ports")
+        if not isinstance(ports, dict):
+            return {}
         out: Dict[int, str] = {}
-        for k, v in raw.items():
+        for k, entry in ports.items():
             try:
                 port = int(k)
             except (ValueError, TypeError):
                 continue
-            if isinstance(v, str) and v:
-                out[port] = v
+            name = self._entry_sandbox(entry)
+            if name:
+                out[port] = name
         return out
+
+    @staticmethod
+    def _entry_sandbox(entry: object) -> Optional[str]:
+        """Extract the active sandbox name from a port-registry entry.
+
+        Accepts the object form {"sandbox": "<name>", "state": "<state>"} and,
+        defensively, a bare string. A "removing" tombstone yields None.
+        """
+        if isinstance(entry, str):
+            return entry or None
+        if isinstance(entry, dict):
+            name = entry.get("sandbox")
+            state = entry.get("state", "active")
+            if isinstance(name, str) and name and state != "removing":
+                return name
+        return None
 
     # -- identity --
 

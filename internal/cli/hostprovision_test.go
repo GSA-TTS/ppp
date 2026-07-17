@@ -29,6 +29,7 @@ func writeClientConfs(t *testing.T, port int) {
 		strconv.Itoa(port): {
 			ListenPort:   port,
 			Address:      "10.0.0.1/32",
+			PrivateKey:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
 			PublicKey:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=",
 			EndpointHost: "172.17.0.3",
 			AllowedIPs:   "0.0.0.0/0",

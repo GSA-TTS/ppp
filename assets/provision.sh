@@ -65,9 +65,13 @@ endpoint_ip() {
 	awk -F'[= :]+' '/^[[:space:]]*Endpoint[[:space:]]*=/ {print $2; exit}' "$WG_CONF_DST"
 }
 
-# The guest's default gateway (gvproxy on libkrun is 192.168.127.1).
+# The guest's off-tunnel default gateway (gvproxy on libkrun is 192.168.127.1).
+# Exclude any default route via wg0 itself: on an idempotent re-run the tunnel's
+# own `default dev wg0` route is present, and we must not parse "wg0" as the
+# gateway. We want the physical-NIC default (a route with a `via <ip>`).
 default_gateway() {
-	ip route show default 2>/dev/null | awk '/default/ {print $3; exit}'
+	ip route show default 2>/dev/null \
+		| awk '$0 !~ /dev wg0/ && /via/ {print $3; exit}'
 }
 
 # 3. Routing: pin an off-tunnel /32 route to the WG endpoint BEFORE bringing the
@@ -77,26 +81,26 @@ default_gateway() {
 bring_up_tunnel() {
 	local ep gw
 	ep="$(endpoint_ip)"
-	gw="$(default_gateway)"
 	if [ -z "$ep" ]; then
 		log "could not parse Endpoint IP from $WG_CONF_DST"
 		exit 1
 	fi
+
+	# Bring down a stale wg0 FIRST so route inspection sees the physical-NIC
+	# default (not a leftover `default dev wg0`) and re-runs converge cleanly.
+	if ip link show wg0 >/dev/null 2>&1; then
+		log "wg0 already present; bringing it down before re-up"
+		wg-quick down wg0 2>/dev/null || ip link del wg0 2>/dev/null || true
+	fi
+
+	gw="$(default_gateway)"
 	if [ -z "$gw" ]; then
-		log "no default gateway; falling back to gvproxy 192.168.127.1"
+		log "no physical default gateway found; falling back to gvproxy 192.168.127.1"
 		gw="192.168.127.1"
 	fi
 	log "pinning off-tunnel route $ep/32 via $gw"
 	ip route replace "$ep/32" via "$gw"
 
-	# wg-quick up is idempotent-ish: if wg0 already exists, reload rather than
-	# fail. Tear down a stale interface first so re-runs converge cleanly.
-	if ip link show wg0 >/dev/null 2>&1; then
-		log "wg0 already present; bringing it down before re-up"
-		wg-quick down wg0 2>/dev/null || ip link del wg0 2>/dev/null || true
-		# re-pin the endpoint route (wg-quick down may have removed it)
-		ip route replace "$ep/32" via "$gw"
-	fi
 	log "wg-quick up wg0"
 	wg-quick up wg0
 	log "routing default via wg0"

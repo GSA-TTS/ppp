@@ -9,7 +9,7 @@ from fakes import FakeFlow, FakeRequest, FakeUdsServer
 
 
 def _setup(tmp_path, handler, policy="default: allow\nrules: []\n"):
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "ppp-red-bird"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "ppp-red-bird", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "ppp-red-bird"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text(policy)
@@ -148,7 +148,7 @@ def test_cache_hits_uds_once_then_sighup_requery(tmp_path):
 def test_uds_error_no_injection(tmp_path):
     # Point at a non-existent socket: uds_query returns None → no injection,
     # request still proceeds (allowed by policy).
-    (tmp_path / "port-registry.json").write_text(json.dumps({"51820": "ppp-red-bird"}))
+    (tmp_path / "port-registry.json").write_text(json.dumps({"ports": {"51820": {"sandbox": "ppp-red-bird", "state": "active"}}}))
     sb = tmp_path / "sandboxes" / "ppp-red-bird"
     sb.mkdir(parents=True)
     (sb / "policy.yaml").write_text("default: allow\nrules: []\n")
