@@ -51,6 +51,12 @@ type Config struct {
 	Ports []int
 	// AddonPath is the filesystem path to the extracted addon.py.
 	AddonPath string
+	// UpstreamCABundle is a PEM CA bundle mitmproxy uses to verify UPSTREAM
+	// (real server) TLS. Empty means "use mitmproxy's default" — but on macOS
+	// the OpenSSL default misses the system trust store, so callers should set
+	// this to a real bundle (e.g. certifi's cacert.pem). It is never used to
+	// weaken verification.
+	UpstreamCABundle string
 	// ReadyTimeout bounds how long Start waits for all client configs to appear.
 	// Zero means DefaultReadyTimeout.
 	ReadyTimeout time.Duration
@@ -103,7 +109,9 @@ func (s *Supervisor) logPath() string { return filepath.Join(s.cfg.DataDir, "pro
 func (s *Supervisor) pidPath() string { return filepath.Join(s.cfg.DataDir, "proxy.pid") }
 
 // buildArgs constructs the mitmdump argv: one --mode wireguard:<keys>@<port>
-// per port, plus the addon and the state-dir option. Never a shell string.
+// per port, the addon, the state-dir option, and — when an upstream CA bundle
+// is resolvable — the upstream trust anchor so mitmproxy can verify TLS to real
+// servers. Never a shell string.
 func (s *Supervisor) buildArgs() []string {
 	argv := []string{mitmdumpBin}
 	for _, port := range s.cfg.Ports {
@@ -114,6 +122,15 @@ func (s *Supervisor) buildArgs() []string {
 		"-s", s.cfg.AddonPath,
 		"--set", "ppp_state_dir="+s.cfg.DataDir,
 	)
+	// Point mitmproxy at a CA bundle for verifying UPSTREAM (real server) certs.
+	// Without this, mitmproxy on some hosts (notably macOS, whose system trust
+	// store is not on OpenSSL's default path) fails the upstream TLS handshake
+	// with "unable to get local issuer certificate" and returns 502 to the
+	// guest. This trusts real CAs for the proxy→server leg; it does NOT weaken
+	// verification (that would be ssl_insecure, which we never set).
+	if bundle := s.cfg.UpstreamCABundle; bundle != "" {
+		argv = append(argv, "--set", "ssl_verify_upstream_trusted_ca="+bundle)
+	}
 	return argv
 }
 

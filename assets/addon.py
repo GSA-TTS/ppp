@@ -69,6 +69,16 @@ TOO_LARGE_STATUS = 413
 MAX_REQUEST_BYTES = 1 * 1024 * 1024  # 1 MB outbound cap (exfil gating).
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB inbound cap (exfil gating).
 
+# OpenSSL X509_V_FLAG_PARTIAL_CHAIN: allow a trusted non-self-signed cert (the
+# conformant interception intermediate) to serve as the chain anchor. Used only
+# on the upstream (proxy->server) verification, never to disable verification.
+_PARTIAL_CHAIN_FLAG = 0x80000
+
+# X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS — the hostname-match flag mitmproxy's
+# TlsConfig sets on upstream verification; mirrored here so our context matches
+# mitmproxy's hostname policy exactly.
+_HOSTFLAG_NO_PARTIAL_WILDCARDS = 0x4
+
 CACHE_TTL_SECONDS = 60.0
 """Lifetime of a cached UDS lookup, keyed by (service, sandbox, host)."""
 
@@ -568,6 +578,99 @@ class PppAddon:
 
     def _on_sighup(self, _signum: int, _frame: object) -> None:  # pragma: no cover
         self.reload()
+
+    def tls_start_server(self, tls_start: object) -> None:  # pragma: no cover - real TLS
+        """Build the UPSTREAM (proxy->server) TLS connection with partial-chain
+        verification enabled, so ppp works on a TLS-inspecting network WITHOUT
+        disabling verification.
+
+        Why this is necessary (ADR-0006): mitmproxy verifies upstream certs with
+        OpenSSL 3, which by default requires the chain to terminate at a
+        self-signed root in the trust store. On a TLS-inspecting network (e.g.
+        Zscaler) the presented chain anchors at a long-lived, RFC-conformant
+        interception INTERMEDIATE, but the self-signed ROOT above it is
+        non-conformant (BasicConstraints not marked critical) and OpenSSL 3
+        rejects it. ppp's upstream CA bundle (internal/catrust) contains that
+        conformant intermediate but drops the broken root, so OpenSSL fails with
+        "unable to get issuer certificate" unless it is allowed to treat the
+        trusted intermediate as the anchor. X509_V_FLAG_PARTIAL_CHAIN does
+        exactly that.
+
+        mitmproxy's built-in TlsConfig.tls_start_server has no option to set that
+        flag, but it skips building when an addon already set tls_start.ssl_conn.
+        So we build the connection here — using mitmproxy's own
+        create_proxy_server_context so cipher/version/verify policy is identical
+        — then add the PARTIAL_CHAIN flag and the standard SNI + hostname
+        verification. Verification stays fully ON (never ssl_insecure); we only
+        permit a trusted intermediate to anchor the chain. On a normal network
+        the chain already ends at a conformant root, so partial-chain changes
+        nothing and this remains correct.
+        """
+        if getattr(tls_start, "ssl_conn", None) is not None:
+            return  # another addon already built it
+        try:
+            self._build_upstream_ssl_conn(tls_start)
+        except Exception as exc:  # noqa: BLE001 - fall back to mitmproxy's builder
+            self._log_warn("ppp: upstream TLS build failed, using default: %r" % (exc,))
+
+    def _build_upstream_ssl_conn(self, tls_start: object) -> None:  # pragma: no cover - real TLS
+        import ipaddress as _ip
+
+        from mitmproxy import ctx as _ctx
+        from mitmproxy.net import tls as _net_tls
+        from OpenSSL import SSL as _SSL
+
+        opts = _ctx.options
+        if opts.ssl_insecure:
+            return  # user explicitly disabled verification; don't second-guess
+        ca_pemfile = opts.ssl_verify_upstream_trusted_ca
+        if not ca_pemfile:
+            return  # no ppp bundle configured; let mitmproxy's default build run
+
+        server = tls_start.conn
+        client = tls_start.context.client
+        if server.sni is None:
+            server.sni = client.sni or server.address[0]
+
+        sslctx = _net_tls.create_proxy_server_context(
+            method=(_net_tls.Method.DTLS_CLIENT_METHOD
+                    if getattr(tls_start, "is_dtls", False)
+                    else _net_tls.Method.TLS_CLIENT_METHOD),
+            min_version=_net_tls.Version[opts.tls_version_server_min],
+            max_version=_net_tls.Version[opts.tls_version_server_max],
+            cipher_list=tuple(server.cipher_list) if server.cipher_list else None,
+            ecdh_curve=_net_tls.get_curve(opts.tls_ecdh_curve_server),
+            verify=_net_tls.Verify.VERIFY_PEER,
+            ca_path=opts.ssl_verify_upstream_trusted_confdir,
+            ca_pemfile=ca_pemfile,
+            client_cert=None,
+            legacy_server_connect=False,
+        )
+        # The one change vs. mitmproxy's default: allow a trusted non-root cert
+        # (the conformant interception intermediate) to anchor the chain.
+        sslctx.get_cert_store().set_flags(_PARTIAL_CHAIN_FLAG)
+
+        conn = _SSL.Connection(sslctx)
+        # SNI + hostname verification, mirroring TlsConfig.tls_start_server.
+        param = _SSL._lib.SSL_get0_param(conn._ssl)
+        _SSL._lib.X509_VERIFY_PARAM_set_hostflags(param, _HOSTFLAG_NO_PARTIAL_WILDCARDS)
+        try:
+            ip = _ip.ip_address(server.sni).packed
+        except ValueError:
+            host = server.sni.encode("idna")
+            conn.set_tlsext_host_name(host)
+            _SSL._openssl_assert(
+                _SSL._lib.X509_VERIFY_PARAM_set1_host(param, host, len(host)) == 1
+            )
+        else:
+            _SSL._openssl_assert(
+                _SSL._lib.X509_VERIFY_PARAM_set1_ip(param, ip, len(ip)) == 1
+            )
+        if server.alpn_offers:
+            conn.set_alpn_protos(list(server.alpn_offers))
+        conn.set_connect_state()
+        tls_start.ssl_conn = conn
+
 
     def reload(self) -> None:
         """Reload the port registry and clear the UDS cache (SIGHUP action).

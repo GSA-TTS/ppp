@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/GSA-TTS/ppp/assets"
+	"github.com/GSA-TTS/ppp/internal/catrust"
 	"github.com/GSA-TTS/ppp/internal/proxy/portpool"
 	"github.com/GSA-TTS/ppp/internal/proxy/supervisor"
 	"github.com/GSA-TTS/ppp/internal/sandbox"
@@ -99,15 +100,20 @@ func (h *hostSupervisor) Start() error {
 	if err != nil {
 		return err
 	}
+	caBundle, err := writeUpstreamCABundle(dataDir)
+	if err != nil {
+		return err
+	}
 	ports := poolPorts(dataDir)
 
 	if err := supervisor.CheckVersion(context.Background()); err != nil {
 		return err
 	}
 	sup, err := supervisor.New(supervisor.Config{
-		DataDir:   dataDir,
-		Ports:     ports,
-		AddonPath: addonPath,
+		DataDir:          dataDir,
+		Ports:            ports,
+		AddonPath:        addonPath,
+		UpstreamCABundle: caBundle,
 	})
 	if err != nil {
 		return err
@@ -118,6 +124,39 @@ func (h *hostSupervisor) Start() error {
 	// The supervisor keeps running as our child; the PID file it wrote lets a
 	// subsequent ppp invocation find and control it.
 	return nil
+}
+
+// writeUpstreamCABundle composes the CA bundle mitmproxy uses to verify upstream
+// (real server) TLS and writes it to $PPP_DATA/wg/upstream-ca.pem, returning its
+// path. It combines the host OS trust store (minus OpenSSL-illegal non-critical
+// BasicConstraints CA certs) with any interception intermediates probed from the
+// network (ADR-0006). PPP_UPSTREAM_CA overrides the whole thing.
+func writeUpstreamCABundle(dataDir string) (string, error) {
+	bundle, err := catrust.Compose(os.Getenv("PPP_UPSTREAM_CA"), interceptionIntermediates())
+	if err != nil {
+		return "", fmt.Errorf("composing upstream CA bundle: %w", err)
+	}
+	path := filepath.Join(dataDir, "wg", "upstream-ca.pem")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, bundle, 0o600); err != nil {
+		return "", fmt.Errorf("writing upstream CA bundle: %w", err)
+	}
+	return path, nil
+}
+
+// interceptionIntermediates probes a stable public host to harvest any TLS
+// interception intermediate CA certs the network injects (e.g. Zscaler). On a
+// normal network this is empty. The probed intermediate anchors the chain under
+// partial-chain verification when the interception ROOT is non-conformant
+// (ADR-0006). PPP_CA_PROBE_HOST overrides the probe target.
+func interceptionIntermediates() []byte {
+	host := os.Getenv("PPP_CA_PROBE_HOST")
+	if host == "" {
+		host = "example.com"
+	}
+	return catrust.ProbeInterceptionCAs(host)
 }
 
 // Stop terminates the recorded mitmdump process by PID and removes the PID file.

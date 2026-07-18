@@ -120,3 +120,26 @@ const sampleBlock = "[10:00:00.000] --------------------------------------------
 	"AllowedIPs = 0.0.0.0/0\n" +
 	"Endpoint = 172.17.0.3:51820\n" +
 	"------------------------------------------------------------\n"
+
+func TestBuildArgsIncludesUpstreamCA(t *testing.T) {
+	s, err := New(Config{
+		DataDir:          "/tmp/d",
+		Ports:            []int{51820},
+		AddonPath:        "/tmp/addon.py",
+		UpstreamCABundle: "/etc/ssl/cert.pem",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	argv := strings.Join(s.buildArgs(), " ")
+	if !strings.Contains(argv, "--set ssl_verify_upstream_trusted_ca=/etc/ssl/cert.pem") {
+		t.Errorf("buildArgs missing upstream CA set: %s", argv)
+	}
+}
+
+func TestBuildArgsOmitsUpstreamCAWhenEmpty(t *testing.T) {
+	s, _ := New(Config{DataDir: "/tmp/d", Ports: []int{51820}, AddonPath: "/a"})
+	if strings.Contains(strings.Join(s.buildArgs(), " "), "ssl_verify_upstream_trusted_ca") {
+		t.Error("buildArgs should omit upstream CA when unset")
+	}
+}
