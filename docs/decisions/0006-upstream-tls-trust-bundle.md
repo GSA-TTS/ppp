@@ -76,7 +76,8 @@ Implementation:
   policy) and installs a **verify callback**. The callback defers entirely to
   OpenSSL's verdict, EXCEPT it tolerates a narrow allowlist of "cannot reach a
   usable trust anchor" error codes
-  (`UNABLE_TO_GET_ISSUER_CERT{,_LOCALLY}`, `NO_ISSUER_PUBLIC_KEY`) **and only when the
+  (`UNABLE_TO_GET_ISSUER_CERT{,_LOCALLY}` — errnos 2 and 20, the only ones
+  observed on the target inspected network) **and only when the
   presented chain is cryptographically AUTHORIZED by the host OS trust store** —
   i.e. some presented CA was actually *signature-verified* as issued by a cert
   the host already trusts. SNI + hostname verification mirror mitmproxy's

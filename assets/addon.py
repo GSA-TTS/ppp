@@ -77,10 +77,10 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB inbound cap (exfil gating).
 # tolerated and stays fatal. Verified against OpenSSL 3.x:
 #   2  = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
 #   20 = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY  (the one observed on Zscaler)
-#   24 = X509_V_ERR_NO_ISSUER_PUBLIC_KEY  (issuer present but no usable pubkey to
-#        chain further — same "no usable anchor above here" class; still gated by
-#        the OS-store signature authorization below, so tolerating it is bounded)
-_INTERCEPTION_TOLERATED_ERRNOS = frozenset({2, 20, 24})
+# The set is limited to exactly the codes observed on the target inspected
+# network, keeping the tolerated surface minimal; any tolerance is still gated by
+# the OS-store signature authorization below.
+_INTERCEPTION_TOLERATED_ERRNOS = frozenset({2, 20})
 
 # Upstream hostname-match flags, mirroring mitmproxy's DEFAULT_HOSTFLAGS exactly
 # (X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT).
