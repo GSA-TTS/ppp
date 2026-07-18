@@ -987,10 +987,11 @@ already trusts, while still rejecting genuinely bad certs
 > disproved that premise — OpenSSL's default (non-strict) verification *accepts*
 > the non-critical-BC root as an anchor — so the drop was self-inflicted and the
 > callback compensated for a self-created failure. Both were removed: the code
-> now simply composes the OS store as-is. The upstream feature request in
-> `docs/notes/mitmproxy-partial-chain-request.md` still stands, but as a
-> convenience ask (a built-in "use the OS trust store" option), not a correctness
-> workaround; ppp no longer couples to mitmproxy TLS internals.
+> now simply composes the OS store as-is. A built-in "verify upstream against the
+> OS trust store" option is already requested upstream as mitmproxy
+> [#8185](https://github.com/mitmproxy/mitmproxy/issues/8185) (with PR #8249 in
+> progress); ppp needs no separate feature request and no longer couples to
+> mitmproxy TLS internals.
 
 ### A.7 Single active sandbox on macOS (ADR-0007)
 Podman Machine permits only **one running VM at a time** (a podman policy, not a

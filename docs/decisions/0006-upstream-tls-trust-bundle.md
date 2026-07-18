@@ -136,7 +136,10 @@ no coupling to mitmproxy TLS internals.
   kept → default verify succeeds, no callback), plus the mitmproxy behavior
   fact-check.
 - `internal/catrust` (OS-store export); `internal/cli/supervisor.go`
-  (`writeUpstreamCABundle`); `docs/notes/mitmproxy-partial-chain-request.md`
-  (upstream FR — now a convenience "use the OS trust store" ask, not a
-  correctness workaround).
+  (`writeUpstreamCABundle`).
+- Upstream: a built-in "verify upstream against the OS trust store" option is
+  already requested as mitmproxy
+  [#8185](https://github.com/mitmproxy/mitmproxy/issues/8185) (PR #8249 in
+  progress) — ppp needs no separate feature request; if that lands, ppp can drop
+  its own OS-store export in favor of the built-in option.
 - ADR-0004 (non-FIPS crypto acceptance).
