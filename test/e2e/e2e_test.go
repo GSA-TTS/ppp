@@ -111,11 +111,11 @@ func TestE2E(t *testing.T) {
 	// Podman Machine allows only one running VM at a time (ADR-0007), so a
 	// leftover VM from a previous aborted run would block this one. Remove any
 	// stray ppp-e2e-* machines first, and always tear down our own at the end.
-	cleanupStrayMachines(t)
+	cleanupStrayMachines(t, h.dataDir)
 	t.Cleanup(func() {
 		_, _ = h.ppp("", "rm", "-f", h.sandbox)
 		_, _ = h.ppp("", "daemon", "stop")
-		cleanupStrayMachines(t)
+		cleanupStrayMachines(t, h.dataDir)
 	})
 
 	// A global allow-all policy so egress isn't blocked by default. We do NOT

@@ -118,6 +118,14 @@ func createLocked(runner podman.PodmanRunner, name string, opts createOptions, s
 // allocated port. VM provisioning beyond init/start is deferred to T13.
 func bringUp(runner podman.PodmanRunner, name string, opts createOptions, alloc portpool.Allocation, start bool) (sandbox.Sandbox, error) {
 	ctx := context.Background()
+	// Enforce single-active BEFORE creating the VM (ADR-0007): the check is
+	// state-only and cheap, so doing it first avoids creating (and then having to
+	// roll back) a Podman Machine that could never start anyway.
+	if start {
+		if err := ensureNoActiveSandbox(name); err != nil {
+			return sandbox.Sandbox{}, err
+		}
+	}
 	if err := runner.Init(ctx, podman.InitOptions{
 		Name:           name,
 		CPUs:           opts.cpus,
@@ -129,9 +137,6 @@ func bringUp(runner podman.PodmanRunner, name string, opts createOptions, alloc 
 
 	status := sandbox.StatusCreated
 	if start {
-		if err := ensureNoActiveSandbox(name); err != nil {
-			return sandbox.Sandbox{}, err
-		}
 		if err := runner.Start(ctx, name); err != nil {
 			return sandbox.Sandbox{}, fmt.Errorf("podman machine start: %w", err)
 		}

@@ -70,15 +70,34 @@ func (s *KeyringStore) Delete(key string) error {
 	return s.indexRemove(key)
 }
 
-// Keys returns the stored ppp secret keys (from the index), sorted. The index
-// itself is never returned.
+// Keys returns the stored ppp secret keys (from the index), sorted, self-healing
+// the index: any indexed key whose value no longer exists (e.g. an index update
+// failed after a Delete) is dropped so `ls` stays truthful. The index itself is
+// never returned.
+//
+// Note: Set/Delete update the value and the index non-atomically, so a partial
+// failure can briefly leave the index out of sync (a stored-but-unlisted orphan,
+// or a listed-but-missing phantom). Keys() heals the phantom case; a subsequent
+// successful Set of an orphan re-adds it. No secret is lost or leaked either way.
 func (s *KeyringStore) Keys() ([]string, error) {
 	keys, err := s.index()
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(keys)
-	return keys, nil
+	live := keys[:0]
+	changed := false
+	for _, k := range keys {
+		if _, gerr := keyring.Get(k, keyringUser); errors.Is(gerr, keyring.ErrNotFound) {
+			changed = true
+			continue // phantom index entry; drop it
+		}
+		live = append(live, k)
+	}
+	if changed {
+		_ = s.writeIndex(live) // best-effort heal; ls is still correct if it fails
+	}
+	sort.Strings(live)
+	return live, nil
 }
 
 // index reads the key index, returning an empty slice when it does not exist.
