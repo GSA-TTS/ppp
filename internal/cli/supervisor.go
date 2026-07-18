@@ -128,11 +128,14 @@ func (h *hostSupervisor) Start() error {
 
 // writeUpstreamCABundle composes the CA bundle mitmproxy uses to verify upstream
 // (real server) TLS and writes it to $PPP_DATA/wg/upstream-ca.pem, returning its
-// path. It combines the host OS trust store (minus OpenSSL-illegal non-critical
-// BasicConstraints CA certs) with any interception intermediates probed from the
-// network (ADR-0006). PPP_UPSTREAM_CA overrides the whole thing.
+// path. It is the host OS trust store minus CA certs OpenSSL 3 rejects
+// (non-critical BasicConstraints). Normal public chains verify against it
+// directly; interception chains are handled at handshake time by the addon's
+// verify callback (ADR-0006), which authorizes them against the host trust
+// store — so no probed/vendored interception cert is baked into this bundle.
+// PPP_UPSTREAM_CA overrides the whole thing.
 func writeUpstreamCABundle(dataDir string) (string, error) {
-	bundle, err := catrust.Compose(os.Getenv("PPP_UPSTREAM_CA"), interceptionIntermediates())
+	bundle, err := catrust.Compose(os.Getenv("PPP_UPSTREAM_CA"))
 	if err != nil {
 		return "", fmt.Errorf("composing upstream CA bundle: %w", err)
 	}
@@ -144,19 +147,6 @@ func writeUpstreamCABundle(dataDir string) (string, error) {
 		return "", fmt.Errorf("writing upstream CA bundle: %w", err)
 	}
 	return path, nil
-}
-
-// interceptionIntermediates probes a stable public host to harvest any TLS
-// interception intermediate CA certs the network injects (e.g. Zscaler). On a
-// normal network this is empty. The probed intermediate anchors the chain under
-// partial-chain verification when the interception ROOT is non-conformant
-// (ADR-0006). PPP_CA_PROBE_HOST overrides the probe target.
-func interceptionIntermediates() []byte {
-	host := os.Getenv("PPP_CA_PROBE_HOST")
-	if host == "" {
-		host = "example.com"
-	}
-	return catrust.ProbeInterceptionCAs(host)
 }
 
 // Stop terminates the recorded mitmdump process by PID and removes the PID file.

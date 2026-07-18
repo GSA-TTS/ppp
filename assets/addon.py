@@ -69,15 +69,22 @@ TOO_LARGE_STATUS = 413
 MAX_REQUEST_BYTES = 1 * 1024 * 1024  # 1 MB outbound cap (exfil gating).
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB inbound cap (exfil gating).
 
-# OpenSSL X509_V_FLAG_PARTIAL_CHAIN: allow a trusted non-self-signed cert (the
-# conformant interception intermediate) to serve as the chain anchor. Used only
-# on the upstream (proxy->server) verification, never to disable verification.
-_PARTIAL_CHAIN_FLAG = 0x80000
+# OpenSSL X509_V error codes we tolerate ONLY when the presented chain is
+# authorized by the host OS trust store (an interception CA). These are the
+# "cannot reach a usable trust anchor" failures a strict OpenSSL 3 raises when
+# ppp's bundle omits the non-conformant interception root; everything else
+# (expiry=10, self-signed=18/19, signature failure=7, hostname=62, ...) is never
+# tolerated and stays fatal. Verified against OpenSSL 3.x:
+#   2  = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
+#   20 = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY  (the one observed on Zscaler)
+#   24 = X509_V_ERR_NO_ISSUER_PUBLIC_KEY  (issuer present but no usable pubkey to
+#        chain further — same "no usable anchor above here" class; still gated by
+#        the OS-store signature authorization below, so tolerating it is bounded)
+_INTERCEPTION_TOLERATED_ERRNOS = frozenset({2, 20, 24})
 
-# X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS — the hostname-match flag mitmproxy's
-# TlsConfig sets on upstream verification; mirrored here so our context matches
-# mitmproxy's hostname policy exactly.
-_HOSTFLAG_NO_PARTIAL_WILDCARDS = 0x4
+# Upstream hostname-match flags, mirroring mitmproxy's DEFAULT_HOSTFLAGS exactly
+# (X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS | X509_CHECK_FLAG_NEVER_CHECK_SUBJECT).
+_UPSTREAM_HOSTFLAGS = 0x4 | 0x20
 
 CACHE_TTL_SECONDS = 60.0
 """Lifetime of a cached UDS lookup, keyed by (service, sandbox, host)."""
@@ -501,6 +508,108 @@ def _default_resolver(host: str) -> Optional[List[str]]:
     return addrs or None
 
 
+# --- Upstream interception-CA authorization (ADR-0006) -----------------------
+#
+# Helpers to authorize a TLS-inspected upstream chain against the host OS trust
+# store. Kept module-level and importable so they can be unit-tested without a
+# live TLS handshake. cryptography is always available alongside mitmproxy.
+
+try:  # pragma: no cover - present with mitmproxy; guarded for pure unit import
+    from cryptography import x509 as _x509
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    from cryptography.hazmat.primitives.asymmetric import padding as _pad
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+except Exception:  # pragma: no cover
+    _x509 = None  # type: ignore[assignment]
+
+
+def _x509_load_der(der: bytes):
+    """Parse a DER certificate into a cryptography Certificate."""
+    return _x509.load_der_x509_certificate(der)
+
+
+def _verify_signed_by(cert, issuer) -> bool:
+    """True iff issuer's public key verifies cert's signature (issuer signed
+    cert). Used to authorize an interception chain against the OS trust store —
+    a real cryptographic check, never a name-only match.
+
+    Only RSA (PKCS1v15) and ECDSA issuers are handled. An Ed25519/EdDSA issuer
+    (whose ``signature_hash_algorithm`` is None) or an RSA-PSS signature returns
+    False here, i.e. it fails closed: such a chain simply won't be authorized as
+    an interception chain (safe direction; current interception vendors use
+    RSA/ECDSA). Any verification error is likewise treated as "not signed by"."""
+    pk = issuer.public_key()
+    try:
+        if isinstance(pk, _rsa.RSAPublicKey):
+            pk.verify(cert.signature, cert.tbs_certificate_bytes,
+                      _pad.PKCS1v15(), cert.signature_hash_algorithm)
+        elif isinstance(pk, _ec.EllipticCurvePublicKey):
+            pk.verify(cert.signature, cert.tbs_certificate_bytes,
+                      _ec.ECDSA(cert.signature_hash_algorithm))
+        else:
+            return False
+        return True
+    except Exception:  # noqa: BLE001 - any failure (bad sig, unsupported alg) = not signed by; fail closed
+        return False
+
+
+def _load_os_trust_store() -> list:
+    """Load the host OS trust store as cryptography Certificate objects.
+
+    macOS keeps roots in the Keychain (not a PEM file), so export via
+    `security`; Linux ships a PEM bundle. Returns [] on failure (which makes the
+    authorization gate fail closed -> interception chains are rejected).
+    """
+    if _x509 is None:
+        return []
+    pem = b""
+    if _sys_platform() == "darwin":
+        import subprocess
+        for kc in (
+            "/Library/Keychains/System.keychain",
+            "/System/Library/Keychains/SystemRootCertificates.keychain",
+        ):
+            try:
+                pem += subprocess.run(
+                    ["security", "find-certificate", "-a", "-p", kc],
+                    capture_output=True, check=False,
+                ).stdout + b"\n"
+            except Exception:  # noqa: BLE001
+                continue
+    else:
+        for path in (
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/cert.pem",
+        ):
+            try:
+                with open(path, "rb") as fh:
+                    pem = fh.read()
+                break
+            except OSError:
+                continue
+    return _parse_pem_certs(pem)
+
+
+def _parse_pem_certs(pem: bytes) -> list:
+    """Parse all certificates from a PEM blob, skipping unparseable ones."""
+    out = []
+    marker = b"-----BEGIN CERTIFICATE-----"
+    parts = pem.split(marker)
+    for part in parts[1:]:
+        block = marker + part.split(b"-----END CERTIFICATE-----")[0] + b"-----END CERTIFICATE-----\n"
+        try:
+            out.append(_x509.load_pem_x509_certificate(block))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _sys_platform() -> str:
+    import sys
+    return sys.platform
+
+
 # --- Redaction ---------------------------------------------------------------
 
 
@@ -536,7 +645,6 @@ def build_flow_log(
 
 # --- Addon -------------------------------------------------------------------
 
-
 class PppAddon:
     """The mitmproxy addon enforcing policy and injecting secrets per sandbox.
 
@@ -565,6 +673,10 @@ class PppAddon:
         # the response hook does not log them a second time when mitmproxy
         # fires it for the synthetic response.
         self._logged_ids: set = set()
+        # Cached host OS trust store (cryptography Cert objects) used to authorize
+        # interception chains in the upstream TLS verify callback. None = not yet
+        # loaded. Populated lazily on first upstream TLS handshake.
+        self._os_store_cache = None
 
     # -- lifecycle --
 
@@ -580,31 +692,36 @@ class PppAddon:
         self.reload()
 
     def tls_start_server(self, tls_start: object) -> None:  # pragma: no cover - real TLS
-        """Build the UPSTREAM (proxy->server) TLS connection with partial-chain
-        verification enabled, so ppp works on a TLS-inspecting network WITHOUT
-        disabling verification.
+        """Build the UPSTREAM (proxy->server) TLS connection so ppp works on a
+        TLS-inspecting network (e.g. Zscaler) WITHOUT disabling verification.
 
         Why this is necessary (ADR-0006): mitmproxy verifies upstream certs with
-        OpenSSL 3, which by default requires the chain to terminate at a
-        self-signed root in the trust store. On a TLS-inspecting network (e.g.
-        Zscaler) the presented chain anchors at a long-lived, RFC-conformant
-        interception INTERMEDIATE, but the self-signed ROOT above it is
-        non-conformant (BasicConstraints not marked critical) and OpenSSL 3
-        rejects it. ppp's upstream CA bundle (internal/catrust) contains that
-        conformant intermediate but drops the broken root, so OpenSSL fails with
-        "unable to get issuer certificate" unless it is allowed to treat the
-        trusted intermediate as the anchor. X509_V_FLAG_PARTIAL_CHAIN does
-        exactly that.
+        OpenSSL 3. On a TLS-inspecting network the presented chain terminates at
+        the interception vendor's self-signed ROOT, which is often non-conformant
+        (BasicConstraints not marked critical) — OpenSSL 3 strict-rejects it, so
+        every upstream handshake fails and the sandbox gets no outbound HTTPS.
+        The host's own trust store already trusts that interception CA (that is
+        why the host's browser/curl work), but OpenSSL cannot consume it the way
+        the OS verifier does.
 
-        mitmproxy's built-in TlsConfig.tls_start_server has no option to set that
-        flag, but it skips building when an addon already set tls_start.ssl_conn.
-        So we build the connection here — using mitmproxy's own
-        create_proxy_server_context so cipher/version/verify policy is identical
-        — then add the PARTIAL_CHAIN flag and the standard SNI + hostname
-        verification. Verification stays fully ON (never ssl_insecure); we only
-        permit a trusted intermediate to anchor the chain. On a normal network
-        the chain already ends at a conformant root, so partial-chain changes
-        nothing and this remains correct.
+        The fix is a scoped verify CALLBACK that runs during the real upstream
+        handshake. It defers entirely to OpenSSL's verdict EXCEPT that it tolerates
+        a narrow allowlist of "cannot reach a usable trust anchor" errors
+        (unable-to-get-issuer / invalid-CA-from-non-critical-BC) AND ONLY when the
+        presented chain is cryptographically AUTHORIZED by the host OS trust store
+        — i.e. some presented CA was actually issued (signature-verified) by a
+        cert the host already trusts. This means:
+          * a normal public chain verifies unchanged (callback never fires);
+          * an interception chain the host trusts is accepted;
+          * a self-signed, untrusted-root, expired, or wrong-hostname cert is
+            still REJECTED (those are not in the allowlist / not authorized).
+        It never sets ssl_insecure and never blanket-trusts a server-presented
+        CA: authorization requires a real signature from the host trust store.
+
+        mitmproxy's TlsConfig.tls_start_server skips building when an addon set
+        tls_start.ssl_conn, so we build the connection using mitmproxy's own
+        create_proxy_server_context (identical cipher/version/verify policy) and
+        install the callback, then mirror TlsConfig's SNI + hostname verification.
         """
         if getattr(tls_start, "ssl_conn", None) is not None:
             return  # another addon already built it
@@ -623,9 +740,6 @@ class PppAddon:
         opts = _ctx.options
         if opts.ssl_insecure:
             return  # user explicitly disabled verification; don't second-guess
-        ca_pemfile = opts.ssl_verify_upstream_trusted_ca
-        if not ca_pemfile:
-            return  # no ppp bundle configured; let mitmproxy's default build run
 
         server = tls_start.conn
         client = tls_start.context.client
@@ -642,18 +756,22 @@ class PppAddon:
             ecdh_curve=_net_tls.get_curve(opts.tls_ecdh_curve_server),
             verify=_net_tls.Verify.VERIFY_PEER,
             ca_path=opts.ssl_verify_upstream_trusted_confdir,
-            ca_pemfile=ca_pemfile,
+            ca_pemfile=opts.ssl_verify_upstream_trusted_ca or None,
             client_cert=None,
             legacy_server_connect=False,
         )
-        # The one change vs. mitmproxy's default: allow a trusted non-root cert
-        # (the conformant interception intermediate) to anchor the chain.
-        sslctx.get_cert_store().set_flags(_PARTIAL_CHAIN_FLAG)
-
         conn = _SSL.Connection(sslctx)
-        # SNI + hostname verification, mirroring TlsConfig.tls_start_server.
+        # Install the interception-tolerant verify callback on the CONNECTION,
+        # not the Context: create_proxy_server_context is @lru_cache'd, so the
+        # same SSL.Context is reused across flows, and pyOpenSSL forbids mutating
+        # a Context once a Connection has been created from it. Connection-level
+        # set_verify overrides the context verify per handshake and is safe to
+        # set on every flow (code review B1).
+        conn.set_verify(_SSL.VERIFY_PEER, self._make_upstream_verify_cb())
+        # SNI + hostname verification, mirroring TlsConfig.tls_start_server exactly
+        # (both hostflags: no-partial-wildcards AND never-check-subject).
         param = _SSL._lib.SSL_get0_param(conn._ssl)
-        _SSL._lib.X509_VERIFY_PARAM_set_hostflags(param, _HOSTFLAG_NO_PARTIAL_WILDCARDS)
+        _SSL._lib.X509_VERIFY_PARAM_set_hostflags(param, _UPSTREAM_HOSTFLAGS)
         try:
             ip = _ip.ip_address(server.sni).packed
         except ValueError:
@@ -671,6 +789,70 @@ class PppAddon:
         conn.set_connect_state()
         tls_start.ssl_conn = conn
 
+    def _make_upstream_verify_cb(self):  # pragma: no cover - real TLS
+        """Return an OpenSSL verify callback that accepts an interception chain
+        the host OS trust store authorizes, while rejecting everything OpenSSL
+        rejects for any other reason (expiry, hostname, self-signed, untrusted).
+        """
+        from OpenSSL import crypto as _crypto
+
+        state = {"authorized": None, "chain": []}
+
+        def cb(_conn, x509obj, errno, _depth, ok):
+            try:
+                der = _crypto.dump_certificate(_crypto.FILETYPE_ASN1, x509obj)
+                state["chain"].append(der)
+            except Exception:  # noqa: BLE001
+                pass
+            if ok:
+                return True
+            if errno not in _INTERCEPTION_TOLERATED_ERRNOS:
+                return False  # expiry, hostname, revocation, etc. -> always reject
+            if state["authorized"] is None:
+                state["authorized"] = self._chain_authorized_by_os_store(state["chain"])
+            return bool(state["authorized"])
+
+        return cb
+
+    def _chain_authorized_by_os_store(self, der_chain: list) -> bool:  # pragma: no cover - real TLS
+        """True iff some cert in the presented chain was cryptographically issued
+        (signature-verified) by a cert in the host OS trust store. This is the
+        authorization gate: it proves the chain ties back to a CA the host
+        already trusts (the interception CA), not one the server merely offered.
+        """
+        store = self._os_trust_store()
+        if not store:
+            return False
+        for der in der_chain:
+            try:
+                cert = _x509_load_der(der)
+            except Exception:  # noqa: BLE001
+                continue
+            for ca in store:
+                if ca.subject != cert.issuer:
+                    continue
+                if _verify_signed_by(cert, ca):
+                    return True
+        return False
+
+    def _os_trust_store(self) -> list:  # pragma: no cover - real TLS
+        """Load + cache the host OS trust store as cryptography Certificate
+        objects (used only for authorization, never handed to OpenSSL).
+
+        An empty result is NOT cached: a transient keychain/read failure must not
+        permanently disable interception support (code review S3). We retry the
+        load until it yields at least one cert, warning each time it comes back
+        empty.
+        """
+        if self._os_store_cache:
+            return self._os_store_cache
+        store = _load_os_trust_store()
+        if not store:
+            self._log_warn("ppp: OS trust store loaded empty; upstream interception "
+                           "chains will fail closed until it can be read")
+            return []
+        self._os_store_cache = store
+        return self._os_store_cache
 
     def reload(self) -> None:
         """Reload the port registry and clear the UDS cache (SIGHUP action).

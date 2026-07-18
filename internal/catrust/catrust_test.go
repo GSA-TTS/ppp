@@ -97,7 +97,7 @@ func TestComposeOverrideReturnsFileVerbatim(t *testing.T) {
 	if err := writeFile(f, content); err != nil {
 		t.Fatal(err)
 	}
-	out, err := Compose(f, nil)
+	out, err := Compose(f)
 	if err != nil {
 		t.Fatalf("Compose(override): %v", err)
 	}

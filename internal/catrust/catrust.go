@@ -10,16 +10,13 @@
 package catrust
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 )
 
 // Compose returns a PEM CA bundle suitable for OpenSSL upstream verification.
@@ -27,11 +24,15 @@ import (
 // Precedence:
 //  1. if override != "" it is returned as-is (the PPP_UPSTREAM_CA escape hatch);
 //  2. otherwise: the host OS trust store, with non-critical-BasicConstraints CA
-//     certs dropped, plus any extraPEM (vendored/probed interception roots and
-//     intermediates).
+//     certs dropped (OpenSSL 3 rejects them and they poison chain building).
+//
+// Normal public chains verify against this bundle directly. Interception chains
+// (whose non-conformant root was dropped here) are handled at handshake time by
+// the addon's verify callback, which authorizes them against the host trust
+// store (ADR-0006) — so no interception cert is baked into this bundle.
 //
 // The composed PEM is returned as bytes; the caller writes it under $PPP_DATA.
-func Compose(override string, extraPEM []byte) ([]byte, error) {
+func Compose(override string) ([]byte, error) {
 	if override != "" {
 		data, err := os.ReadFile(override)
 		if err != nil {
@@ -44,47 +45,7 @@ func Compose(override string, extraPEM []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	combined := append([]byte{}, osPEM...)
-	if len(extraPEM) > 0 {
-		combined = append(combined, '\n')
-		combined = append(combined, extraPEM...)
-	}
-	return filterOpenSSLUsable(combined), nil
-}
-
-// ProbeInterceptionCAs opens a TLS connection to probeHost:443 and returns the
-// PEM of the CA (non-leaf) certificates the server presents. On a TLS-inspecting
-// network this yields the interception intermediate(s) — including a conformant
-// one that can anchor the chain under partial-chain verification even when the
-// interception ROOT is non-conformant (ADR-0006). It verifies nothing (it is
-// only harvesting the presented chain), and returns an empty result (no error)
-// when the presented chain is a normal public chain or the probe fails, so a
-// normal network simply contributes nothing extra.
-func ProbeInterceptionCAs(probeHost string) []byte {
-	dialer := &net.Dialer{Timeout: 8 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", probeHost+":443", &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // harvesting the presented chain only; nothing is trusted from this probe
-		ServerName:         probeHost,
-	})
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = conn.Close() }()
-
-	var out []byte
-	for i, cert := range conn.ConnectionState().PeerCertificates {
-		if i == 0 {
-			continue // skip the leaf; only CA certs may anchor
-		}
-		if !cert.IsCA {
-			continue
-		}
-		out = append(out, pem.EncodeToMemory(&pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: cert.Raw,
-		})...)
-	}
-	return out
+	return filterOpenSSLUsable(osPEM), nil
 }
 
 // filterOpenSSLUsable drops CA certificates whose BasicConstraints is present
