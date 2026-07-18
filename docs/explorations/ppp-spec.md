@@ -911,3 +911,117 @@ Concrete walkthrough of mitmproxy WG mode + Podman containers as WG clients (`--
 11. **WireGuard endpoint host address (RESOLVED via live spike)** — the guest must use the **gvproxy host alias `192.168.127.254`** as the WireGuard `Endpoint`, not the host LAN IP; the LAN-IP path silently drops handshake packets on libkrun. The supervisor rewrites `Endpoint` accordingly.
 12. **mitmdump stdout buffering (impl note)** — mitmdump block-buffers stdout when redirected to a file, so `proxy.log` can stay empty while running; the supervisor must capture via a PTY or set `PYTHONUNBUFFERED=1` to read client-config blocks promptly.
 13. **WireGuard peer public key (impl note)** — the per-port keys file holds *private* keys; the peer **public** key for `wg0.conf` must be taken from the emitted client-config block, or the handshake fails (`InvalidAeadTag`).
+---
+
+## Appendix A — Differences as of v1.0.0-rc1
+
+This spec is the pre-implementation design. Building and validating v1
+end-to-end on real macOS/libkrun (including behind Zscaler TLS inspection)
+surfaced a number of significant deviations. This appendix records them so the
+spec body above can be read as the original intent, with the appendix as the
+authoritative "what actually shipped." Each item links to the governing ADR
+(`docs/decisions/`) and, where relevant, the research/spike memo
+(`docs/explorations/research/`).
+
+Status: **v1.0.0-rc1** — feature-complete, validated end-to-end; all 14 v1
+tickets (#13, T1–T14) closed. Not yet promoted to v1.0.0 (opencode agent image
++ release automation pending, #37).
+
+### A.1 Sandbox identity accessor (ADR-0003)
+Identity is the receiving WireGuard **listen port**, as the spec says — but the
+mitmproxy 12.2.3 accessor is `flow.client_conn.proxy_mode.listen_port()`, **not**
+`flow.client.sockname` (which surfaces the inner *destination* on that version).
+Guarded against upstream drift by a golden source-hash test
+(`tests/addon/test_mitmproxy_internals_drift.py`).
+
+### A.2 WireGuard endpoint = gvproxy host alias, and client key handling
+The guest `wg0.conf` `Endpoint` must be the gvproxy host alias
+**`192.168.127.254`**, not the host LAN IP (the LAN IP silently drops handshakes
+on libkrun — see `research/spike-e2e-results.md`). The client **PrivateKey** from
+mitmproxy's emitted config must be carried into `wg0.conf` (omitting it makes
+`wg-quick` invent a random key → handshake rejected). Off-tunnel `/32` route to
+the endpoint via the gvproxy gateway (`192.168.127.1`) + `Table = off` prevents
+the routing loop.
+
+### A.3 Client-config capture: stdout, non-deterministic order
+mitmdump emits the WireGuard client configs on **stdout** (not stderr/INFO as an
+earlier draft assumed), each block fenced by a line of exactly 60 hyphens, in
+**non-deterministic order** — so blocks are correlated to ports by the
+`Endpoint = host:<port>` line inside each block, never by `--mode` flag order.
+The supervisor captures via a PTY / `PYTHONUNBUFFERED=1` (mitmdump block-buffers
+to files). Supersedes the "stderr/INFO" and "flag order" notes in §3.1/§5.3.
+
+### A.4 Guest DNS off-tunnel via gvproxy (ADR-0005)
+The written `wg0.conf` **omits** the `DNS = 10.0.0.53` line (§5.2's original
+"keep DNS in-tunnel" note is reversed): keeping it makes `wg-quick up` invoke a
+fragile resolvconf path that aborts on FCOS. The guest uses gvproxy's resolver;
+egress is still fully policy-controlled at the connection layer (only DNS
+*lookups* are not seen by the proxy — a documented, accepted tradeoff).
+
+### A.5 Provisioning: no rpm-ostree install / no reboot on macOS
+`wireguard-tools` ships in the Podman `machine-os` image, so provisioning does
+**not** `rpm-ostree install` or reboot on the macOS/libkrun path (retiring Open
+Risk #2 for macOS; see `research/research-t2-wg-guest.md`). Provisioning uses
+`podman machine cp` + `ssh -- bash provision.sh` (not `--playbook`). The provision
+script is embedded via `//go:embed`.
+
+### A.6 Upstream TLS on TLS-inspecting networks (ADR-0006) — largest deviation
+The spec did not anticipate corporate TLS inspection. mitmproxy's upstream
+(proxy→server) verification uses OpenSSL 3, which (a) does not read the macOS
+Keychain and (b) strict-rejects a non-conformant interception root
+(BasicConstraints not marked critical, e.g. Zscaler's 2014 root). Solution: the
+addon's `tls_start_server` hook builds the upstream connection via mitmproxy's
+own `create_proxy_server_context` and installs a **verify callback** that
+tolerates only "no usable issuer" errnos (`{2, 20}`) and only when the presented
+chain is cryptographically **authorized by the host OS trust store** —
+verification is **never disabled**; expiry/hostname/self-signed/untrusted-root
+still fail. This couples to mitmproxy internals (guarded by the drift test) and
+motivates an upstream feature request (`docs/notes/mitmproxy-partial-chain-request.md`).
+The upstream CA bundle handed to mitmproxy is the host OS trust store minus
+OpenSSL-illegal CA certs (`internal/catrust`).
+
+### A.7 Single active sandbox on macOS (ADR-0007)
+Podman Machine permits only **one running VM at a time** (a podman policy, not a
+hypervisor limit; see `research/research-concurrent-vms.md`). This contradicts
+the spec's "N sandboxes simultaneously." v1 refuses a second *active* sandbox
+with a clear message; multiple *stopped* sandboxes coexist. The single-mitmdump /
+WireGuard-port-pool machinery (§4, ADR-0002) is retained unchanged — correct for
+one active client and forward-compatible with concurrency. True concurrent
+per-sandbox microVMs are a v2 direction (drop below `podman machine`: Lima or
+direct krunkit/vfkit — investigation #38).
+
+### A.8 Daemon binds only registry-claimed ports (isolation-bypass fix)
+The daemon originally launched a `--mode wireguard` listener for the entire pool
+(51820–51899). A single busy port anywhere in the range made mitmdump exit
+("address already in use"), so no WG listeners came up, the tunnel never
+established, and guest traffic **silently bypassed to the network directly** —
+the isolation guarantee void, masked by a stale flow log
+(`research/diag-intercept-bypass.md`). Fixed: bind only ports actually claimed in
+the port registry (`activePoolPorts`), plus the base port when none is claimed.
+Given A.7 that is normally exactly one port. Covered by the seam-8 e2e.
+
+### A.9 Non-FIPS crypto accepted (ADR-0004)
+WireGuard (Curve25519/ChaCha20-Poly1305) and the `age` fallback store are not
+FIPS-validated; accepted for this local, non-FISMA developer tool, with a
+scope-guard revisit trigger.
+
+### A.10 Base image / toolchain choices (not in the original spec)
+The dev container is **Ubuntu 26.04** with **podman 6.0.1 via pinned Homebrew**
+(no GA distro ships a full podman 6.x client; source-build is a documented
+fallback — see `research/research-brew-podman-pin.md`,
+`research/research-podman-buildtime.md`, `research/research-ubuntu2604-podman.md`).
+All pinned tool versions live in `versions.env` (single source of truth).
+mitmproxy is pinned to **12.2.3**.
+
+### A.11 CLI/registry details
+- `ppp exec SANDBOX -- CMD...` forwards the guest command as an argv slice
+  (never a shell string); guest flags after `--` are not parsed as ppp flags.
+- The opencode agent image ref is overridable via `PPP_OPENCODE_IMAGE`
+  (`PPP_<AGENT>_IMAGE`) — used by the e2e and as an air-gapped/mirror escape
+  hatch. The default `ghcr.io/gsa-tts/ppp-opencode` image is **not yet published**
+  (#37).
+
+### A.12 Deferred by design (unchanged from §11)
+Kits, templates (v1 uses OCI images directly), and Windows/WSL support are out of
+v1 scope. Windows-specific Open Risk #1 (WSL wireguard-go fallback) is therefore
+untested and deferred.
