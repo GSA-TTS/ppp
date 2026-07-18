@@ -20,7 +20,7 @@ ifeq ($(GOBIN),)
 GOBIN := $(shell $(GO) env GOPATH)/bin
 endif
 
-.PHONY: all setup check version-sync build test test-addon vet fmt-check lint contract clean
+.PHONY: all setup check version-sync build test test-addon test-e2e vet fmt-check lint contract clean
 
 all: check
 
@@ -99,10 +99,19 @@ lint:
 		echo ">> golangci-lint not installed; skipping (run 'make setup')"; \
 	fi
 
-## test: run the Go test suite.
+## test: run the Go test suite (excludes the host-only e2e; see test-e2e).
 test:
 	@echo ">> go test"
 	$(GO) test ./...
+
+## test-e2e: the single host-only end-to-end test (T14). Requires a real host
+## with podman + mitmdump 12.2.3 + network; creates and tears down a throwaway
+## Podman Machine. Excluded from `make check`/CI/the dev container by the `e2e`
+## build tag. Uses a dummy secret only. Point PPP_OPENCODE_IMAGE at a real agent
+## image to exercise the agent too (defaults to a tiny public image).
+test-e2e:
+	@echo ">> go test -tags e2e ./test/e2e (host-only; ~minutes)"
+	$(GO) test -tags e2e -timeout 20m -v ./test/e2e/
 
 ## test-addon: lint + test the embedded Python mitmproxy addon.
 ## Requires ruff + pytest with mitmproxy's runtime deps (ruamel.yaml) importable

@@ -45,14 +45,15 @@ type mutableStore interface {
 }
 
 // requireMutable adapts the injected Store to a mutableStore, erroring clearly
-// when the store cannot be written (e.g. the real read-only KeyringStore before
-// its write path lands). This keeps `set`/`rm`/`ls` honest rather than silently
+// when the store does not support writes. The primary KeyringStore is mutable;
+// the age fallback store is read-only at runtime (it is populated out of band),
+// so `set`/`rm` against an age-only host report this rather than silently
 // no-op'ing.
 func requireMutable(s secret.Store) (mutableStore, error) {
 	if m, ok := s.(mutableStore); ok {
 		return m, nil
 	}
-	return nil, fmt.Errorf("secret storage write path not implemented on this host yet (T13); the injected store is read-only")
+	return nil, fmt.Errorf("this secret store is read-only on this host; use the OS keychain, or populate the age store out of band")
 }
 
 // newSecretSetCmd stores a service secret. Value comes from --from-env or stdin.

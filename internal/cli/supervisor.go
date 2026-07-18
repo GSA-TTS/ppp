@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/GSA-TTS/ppp/assets"
 	"github.com/GSA-TTS/ppp/internal/catrust"
@@ -104,7 +105,15 @@ func (h *hostSupervisor) Start() error {
 	if err != nil {
 		return err
 	}
-	ports := poolPorts(dataDir)
+	ports, err := activePoolPorts(dataDir)
+	if err != nil {
+		return err
+	}
+	if len(ports) == 0 {
+		// No sandbox has claimed a port yet: start the single base-port listener
+		// so the daemon is up and ready for the first sandbox's tunnel.
+		ports = []int{portpool.BasePort}
+	}
 
 	if err := supervisor.CheckVersion(context.Background()); err != nil {
 		return err
@@ -171,15 +180,24 @@ func (h *hostSupervisor) Stop() error {
 	return nil
 }
 
-// poolPorts returns the ordered WireGuard port list for the pool. Size is the
-// portpool default unless overridden; ports run from BasePort.
-func poolPorts(_ string) []int {
-	n := portpool.DefaultSize
-	ports := make([]int, n)
-	for i := 0; i < n; i++ {
-		ports[i] = portpool.BasePort + i
+// activePoolPorts returns the WireGuard ports actually claimed by sandboxes in
+// the port registry. Binding only claimed ports (rather than the whole
+// 51820–51899 reservation) means a stray process on some unused pool port can
+// no longer take down the entire proxy at start (diagnosis: one busy port in
+// the full range killed mitmdump with "address already in use — exiting").
+// Given the v1 single-active-sandbox limit (ADR-0007) this is normally one port.
+func activePoolPorts(dataDir string) ([]int, error) {
+	pool, err := portpool.New(filepath.Join(dataDir, "port-registry.json"))
+	if err != nil {
+		return nil, err
 	}
-	return ports
+	allocs := pool.Allocations()
+	ports := make([]int, 0, len(allocs))
+	for _, a := range allocs {
+		ports = append(ports, a.Port)
+	}
+	sort.Ints(ports)
+	return ports, nil
 }
 
 // parsePID parses a trimmed decimal PID from proxy.pid contents.

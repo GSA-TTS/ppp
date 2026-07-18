@@ -129,6 +129,9 @@ func bringUp(runner podman.PodmanRunner, name string, opts createOptions, alloc 
 
 	status := sandbox.StatusCreated
 	if start {
+		if err := ensureNoActiveSandbox(name); err != nil {
+			return sandbox.Sandbox{}, err
+		}
 		if err := runner.Start(ctx, name); err != nil {
 			return sandbox.Sandbox{}, fmt.Errorf("podman machine start: %w", err)
 		}
@@ -150,4 +153,29 @@ func bringUp(runner podman.PodmanRunner, name string, opts createOptions, alloc 
 		return sandbox.Sandbox{}, err
 	}
 	return box, nil
+}
+
+// ensureNoActiveSandbox enforces the v1 single-active-sandbox constraint on
+// Podman-Machine hosts (ADR-0007): Podman Machine allows only one running VM at
+// a time, so starting a second sandbox fails with a raw "only one VM can be
+// active at a time" error. We pre-check the recorded sandbox state and return a
+// clear, actionable message naming the running sandbox instead. `about` is the
+// sandbox being started (excluded from the check).
+func ensureNoActiveSandbox(about string) error {
+	boxes, err := loadAllSandboxes()
+	if err != nil {
+		return err
+	}
+	for _, b := range boxes {
+		if b.Name == about {
+			continue
+		}
+		if b.Status == sandbox.StatusRunning {
+			return fmt.Errorf(
+				"sandbox %q is already running; only one sandbox can run at a time on this host "+
+					"(stop it first with `ppp stop %s`; see docs/decisions/0007)",
+				b.Name, b.Name)
+		}
+	}
+	return nil
 }

@@ -135,3 +135,64 @@ func assertRecorded(t *testing.T, f *podman.Fake, op string) {
 		t.Errorf("expected runner to record a %q call; calls=%v", op, f.Calls)
 	}
 }
+
+func TestExecForwardsGuestCommandWithFlags(t *testing.T) {
+	testEnv(t)
+	d, h := newHarness()
+	// a sandbox must exist for exec to resolve it
+	box := sandbox.Sandbox{Name: "ppp-red-bird", Agent: "opencode", Workspace: "/tmp/ws", Status: sandbox.StatusRunning, Port: 51820, InnerIP: "10.0.0.1"}
+	if err := box.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// guest flags after -- must reach the runner, not be parsed by ppp
+	if _, err := run(t, d, "", "exec", "ppp-red-bird", "--", "curl", "-s", "-o", "/dev/null", "https://x"); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	var got []string
+	for _, c := range h.runner.Calls {
+		if c.Op == "ssh" {
+			got = c.Argv
+		}
+	}
+	// SSHArgs prefixes: podman machine ssh <name> -- <guest cmd...>
+	want := "podman machine ssh ppp-red-bird -- curl -s -o /dev/null https://x"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("ssh argv = %q, want %q", strings.Join(got, " "), want)
+	}
+}
+
+func TestRunRejectsSecondActiveSandbox(t *testing.T) {
+	testEnv(t)
+	d, h := newHarness()
+	// An already-running sandbox on this host.
+	running := sandbox.Sandbox{Name: "ppp-red-bird", Agent: "opencode", Workspace: "/tmp/ws", Status: sandbox.StatusRunning, Port: 51820, InnerIP: "10.0.0.1"}
+	if err := running.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	out, err := run(t, d, "", "run", "opencode", "/tmp/ws2", "--name", "ppp-blue-fox")
+	if err == nil {
+		t.Fatalf("expected run to be rejected while another sandbox runs; out=%q", out)
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("expected single-active error, got %v", err)
+	}
+	// The second VM must NOT have been started.
+	for _, c := range h.runner.Calls {
+		if c.Op == "start" {
+			t.Errorf("start should not have been called: %v", c.Argv)
+		}
+	}
+}
+
+func TestCreateWithoutStartAllowedAlongsideRunning(t *testing.T) {
+	testEnv(t)
+	d, _ := newHarness()
+	running := sandbox.Sandbox{Name: "ppp-red-bird", Agent: "opencode", Workspace: "/tmp/ws", Status: sandbox.StatusRunning, Port: 51820, InnerIP: "10.0.0.1"}
+	if err := running.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// create (no --start) must be allowed while another runs: coexisting stopped sandboxes are fine.
+	if _, err := run(t, d, "", "create", "opencode", "/tmp/ws2", "--name", "ppp-blue-fox"); err != nil {
+		t.Fatalf("create alongside a running sandbox should succeed, got %v", err)
+	}
+}

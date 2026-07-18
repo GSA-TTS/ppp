@@ -53,3 +53,23 @@ func TestNames(t *testing.T) {
 		t.Errorf("Names = %v, want [opencode]", got)
 	}
 }
+
+func TestLookupImageOverrideEnv(t *testing.T) {
+	t.Setenv("PPP_OPENCODE_IMAGE", "ghcr.io/example/custom-opencode:test")
+	a, err := agent.Lookup("opencode")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if a.DefaultImage != "ghcr.io/example/custom-opencode:test" {
+		t.Errorf("image override not applied: %q", a.DefaultImage)
+	}
+}
+
+func TestImageEnvVarName(t *testing.T) {
+	// exercised indirectly, but assert the mapping for opencode via override.
+	t.Setenv("PPP_OPENCODE_IMAGE", "x/y:z")
+	a, _ := agent.Lookup("opencode")
+	if a.DefaultImage != "x/y:z" {
+		t.Errorf("expected PPP_OPENCODE_IMAGE to map, got %q", a.DefaultImage)
+	}
+}

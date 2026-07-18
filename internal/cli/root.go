@@ -52,7 +52,7 @@ func addCommands(root *cobra.Command, d deps) {
 		newLsCmd(),
 		newStopCmd(d),
 		newRmCmd(d),
-		newExecCmd(),
+		newExecCmd(d),
 		newCpCmd(),
 		newPortsCmd(),
 		newSetupCmd(),

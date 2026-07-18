@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/spf13/cobra"
 )
@@ -38,6 +39,11 @@ func newRunCmd(d deps) *cobra.Command {
 			if err := outf(cmd.OutOrStdout(),
 				"started sandbox %s (port %d, inner IP %s)\n", box.Name, box.Port, box.InnerIP); err != nil {
 				return err
+			}
+			// Lazily ensure the proxy daemon is running (spec §9.4) so its
+			// captured client configs exist before we provision the guest.
+			if err := d.newSupervisor().Start(); err != nil {
+				return fmt.Errorf("starting proxy daemon: %w", err)
 			}
 			err = provisionAndRun(context.Background(), runner, box, true, agentArgs)
 			if errors.Is(err, errDaemonNotReady) {

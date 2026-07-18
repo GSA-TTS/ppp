@@ -10,6 +10,8 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 )
 
 // ErrUnknownAgent is returned for an agent name not in the v1 registry.
@@ -62,12 +64,41 @@ var registry = map[string]Agent{
 }
 
 // Lookup returns the registered agent by name, or ErrUnknownAgent.
+//
+// The default container image may be overridden with PPP_<AGENT>_IMAGE (agent
+// name upper-cased, non-alphanumerics -> underscore), e.g. PPP_OPENCODE_IMAGE.
+// This is primarily for testing (the e2e points it at a small public image
+// before the real opencode image is published) but is a legitimate escape hatch
+// for air-gapped/mirror registries too. The override is validated at the point
+// of use (guest-arg safety) like any image ref.
 func Lookup(name string) (Agent, error) {
 	a, ok := registry[name]
 	if !ok {
 		return Agent{}, fmt.Errorf("%w: %q (v1 supports: opencode)", ErrUnknownAgent, name)
 	}
+	if img := os.Getenv(imageEnvVar(name)); img != "" {
+		a.DefaultImage = img
+	}
 	return a, nil
+}
+
+// imageEnvVar returns the per-agent image-override env var name, e.g.
+// "opencode" -> "PPP_OPENCODE_IMAGE".
+func imageEnvVar(name string) string {
+	var b strings.Builder
+	b.WriteString("PPP_")
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 'a' + 'A')
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	b.WriteString("_IMAGE")
+	return b.String()
 }
 
 // Names returns the registered agent names (v1: just "opencode").
