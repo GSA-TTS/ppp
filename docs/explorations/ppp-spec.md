@@ -277,7 +277,7 @@ Dependencies: Python 3.9+, `mitmdump` on PATH (bundled or pip-installed on first
 - **Rewrite client config per sandbox:** when a sandbox claims port N, take the client config for port N, rewrite `Address = 10.0.0.1/32` → `Address = 10.0.0.<sandbox-ip-octet>/32`, rewrite `Endpoint = ...` → `Endpoint = 192.168.127.254:<port>` (the gvproxy host alias reachable from the guest — verified: the host LAN IP silently drops WG handshakes). Write to `$PPP_DATA/sandboxes/<name>/wg0.conf`.
 - **Lifecycle:** the daemon process starts once (via `ppp daemon start` or lazily on first `ppp run`) and stays running. `ppp daemon stop` kills it. `ppp daemon status` checks `$PPP_DATA/proxy.pid`.
 - **Log:** `$PPP_DATA/proxy.log` (mitmdump stdout/stderr).
-- **Upstream (proxy→server) TLS verification (ADR-0006):** mitmproxy verifies real-server certs with OpenSSL 3, which does not read the macOS Keychain and strict-rejects a non-conformant interception root (e.g. Zscaler's, whose BasicConstraints is not marked critical). ppp therefore passes mitmproxy a bundle = the host OS trust store minus OpenSSL-illegal CA certs (`internal/catrust`, written to `$PPP_DATA/wg/upstream-ca.pem`; `PPP_UPSTREAM_CA` overrides), and the addon's `tls_start_server` hook installs a verify **callback** that tolerates only the "no usable trust anchor" errors and only when the presented chain is cryptographically authorized by the host trust store. Verification is never disabled — expiry/hostname/self-signed/untrusted-root still fail. Works unchanged on normal networks; self-heals across interception-cert rotation (no probe, no `ppp setup`).
+- **Upstream (proxy→server) TLS verification (ADR-0006):** mitmproxy verifies real-server certs against a PEM bundle only (default: certifi) and never consults the OS trust store, so on a TLS-inspecting network (e.g. Zscaler) the intercepted chain has no anchor and verification fails (`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`) even though the host itself trusts the interception CA. ppp therefore hands mitmproxy the **host OS trust store as-is** as its upstream bundle (`internal/catrust`, written to `$PPP_DATA/wg/upstream-ca.pem`; `PPP_UPSTREAM_CA` overrides). mitmproxy's default verification then anchors the intercepted chain at the interception root the host already trusts, while still rejecting genuinely bad certs (expiry/self-signed/untrusted-root/hostname). No cert filtering, no partial-chain flag, and no custom verify callback — verification is never disabled. Works unchanged on normal networks; self-heals across interception-cert rotation (the bundle is whatever the host currently trusts).
 
 ### 5.4 Addon (mitmproxy Python addon)
 
@@ -965,20 +965,32 @@ Risk #2 for macOS; see `research/research-t2-wg-guest.md`). Provisioning uses
 `podman machine cp` + `ssh -- bash provision.sh` (not `--playbook`). The provision
 script is embedded via `//go:embed`.
 
-### A.6 Upstream TLS on TLS-inspecting networks (ADR-0006) — largest deviation
-The spec did not anticipate corporate TLS inspection. mitmproxy's upstream
-(proxy→server) verification uses OpenSSL 3, which (a) does not read the macOS
-Keychain and (b) strict-rejects a non-conformant interception root
-(BasicConstraints not marked critical, e.g. Zscaler's 2014 root). Solution: the
-addon's `tls_start_server` hook builds the upstream connection via mitmproxy's
-own `create_proxy_server_context` and installs a **verify callback** that
-tolerates only "no usable issuer" errnos (`{2, 20}`) and only when the presented
-chain is cryptographically **authorized by the host OS trust store** —
-verification is **never disabled**; expiry/hostname/self-signed/untrusted-root
-still fail. This couples to mitmproxy internals (guarded by the drift test) and
-motivates an upstream feature request (`docs/notes/mitmproxy-partial-chain-request.md`).
-The upstream CA bundle handed to mitmproxy is the host OS trust store minus
-OpenSSL-illegal CA certs (`internal/catrust`).
+### A.6 Upstream TLS on TLS-inspecting networks (ADR-0006)
+The spec did not anticipate corporate TLS inspection. mitmproxy verifies the
+upstream (proxy→server) leg against a PEM bundle only (default: certifi) and
+never consults the OS trust store, so on a TLS-inspecting network (e.g. Zscaler)
+the intercepted chain has no anchor and verification fails with
+`X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY` — even though the host itself
+trusts the interception CA (which is why the host's browser/curl succeed).
+Solution: hand mitmproxy the **host OS trust store** as its upstream bundle
+(`internal/catrust` exports it to PEM; the supervisor passes it via
+`ssl_verify_upstream_trusted_ca`; `PPP_UPSTREAM_CA` overrides). OpenSSL's default
+verification then anchors the intercepted chain at the interception root the host
+already trusts, while still rejecting genuinely bad certs
+(expiry/self-signed/untrusted-root/hostname). No cert filtering, no
+`X509_V_FLAG_PARTIAL_CHAIN`, and no custom verify callback are needed.
+
+> **Correction (post-rc1):** an earlier implementation dropped non-critical-
+> BasicConstraints CA certs from the bundle and re-admitted the interception
+> chain via an addon `tls_start_server` verify callback + partial-chain, on the
+> belief that OpenSSL 3 rejects such a root by default. A fact-check + spike
+> disproved that premise — OpenSSL's default (non-strict) verification *accepts*
+> the non-critical-BC root as an anchor — so the drop was self-inflicted and the
+> callback compensated for a self-created failure. Both were removed: the code
+> now simply composes the OS store as-is. The upstream feature request in
+> `docs/notes/mitmproxy-partial-chain-request.md` still stands, but as a
+> convenience ask (a built-in "use the OS trust store" option), not a correctness
+> workaround; ppp no longer couples to mitmproxy TLS internals.
 
 ### A.7 Single active sandbox on macOS (ADR-0007)
 Podman Machine permits only **one running VM at a time** (a podman policy, not a

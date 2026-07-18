@@ -1,17 +1,23 @@
 // Package catrust composes the CA bundle mitmproxy uses to verify UPSTREAM
-// (real server) TLS. mitmproxy is Python/OpenSSL and does not read the macOS
-// Keychain, and OpenSSL 3 strict-rejects a CA certificate whose BasicConstraints
-// extension is not marked critical — which some corporate interception roots
-// (e.g. Zscaler's) violate. ppp therefore builds its own bundle at daemon start:
-// export the OS trust store, DROP any CA cert with a non-critical
-// BasicConstraints (OpenSSL would reject it and it poisons the whole
-// verification), and append vendored interception roots as a fallback. See
-// ADR-0006.
+// (real server) TLS.
+//
+// mitmproxy verifies the upstream leg against a PEM bundle only
+// (ssl_verify_upstream_trusted_ca, defaulting to certifi) and never consults the
+// OS trust store — not the macOS Keychain, not the Windows store. On a
+// TLS-inspecting network (e.g. Zscaler) the presented chain therefore has no
+// anchor in certifi and verification fails with
+// X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY, even though the host itself
+// trusts the interception CA (which is why the host's browser/curl succeed).
+//
+// The fix is simply to hand mitmproxy the host OS trust store: export it to PEM
+// and point ssl_verify_upstream_trusted_ca at it. OpenSSL's default (non-strict)
+// verification then anchors the intercepted chain at the interception root the
+// host already trusts, while still rejecting genuinely bad certs (expired,
+// self-signed, untrusted-root, hostname mismatch). No cert filtering, no
+// partial-chain flag, and no custom verify callback are required — see ADR-0006.
 package catrust
 
 import (
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,15 +29,12 @@ import (
 //
 // Precedence:
 //  1. if override != "" it is returned as-is (the PPP_UPSTREAM_CA escape hatch);
-//  2. otherwise: the host OS trust store, with non-critical-BasicConstraints CA
-//     certs dropped (OpenSSL 3 rejects them and they poison chain building).
+//  2. otherwise: the host OS trust store, exported verbatim.
 //
-// Normal public chains verify against this bundle directly. Interception chains
-// (whose non-conformant root was dropped here) are handled at handshake time by
-// the addon's verify callback, which authorizes them against the host trust
-// store (ADR-0006) — so no interception cert is baked into this bundle.
-//
-// The composed PEM is returned as bytes; the caller writes it under $PPP_DATA.
+// The bundle is the host trust store as-is: whatever the host trusts (including
+// a corporate interception root) becomes a valid upstream anchor, and nothing
+// else. The composed PEM is returned as bytes; the caller writes it under
+// $PPP_DATA.
 func Compose(override string) ([]byte, error) {
 	if override != "" {
 		data, err := os.ReadFile(override)
@@ -41,51 +44,7 @@ func Compose(override string) ([]byte, error) {
 		return data, nil
 	}
 
-	osPEM, err := osTrustStorePEM()
-	if err != nil {
-		return nil, err
-	}
-	return filterOpenSSLUsable(osPEM), nil
-}
-
-// filterOpenSSLUsable drops CA certificates whose BasicConstraints is present
-// but not marked critical. OpenSSL 3 rejects such a cert during chain building
-// ("Basic Constraints of CA cert not marked critical"), and including it makes
-// verification fail even when a conformant intermediate could anchor the chain.
-// Non-CA (leaf) certs and certs without BasicConstraints are kept unchanged.
-func filterOpenSSLUsable(pemBytes []byte) []byte {
-	var out []byte
-	rest := pemBytes
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			continue // unparseable: drop it rather than risk poisoning the store
-		}
-		if cert.IsCA && cert.BasicConstraintsValid && !isBasicConstraintsCritical(cert) {
-			continue // OpenSSL 3 would reject this CA cert; drop it
-		}
-		out = append(out, pem.EncodeToMemory(block)...)
-	}
-	return out
-}
-
-// isBasicConstraintsCritical reports whether the cert's BasicConstraints
-// extension (OID 2.5.29.19) is marked critical.
-func isBasicConstraintsCritical(cert *x509.Certificate) bool {
-	for _, ext := range cert.Extensions {
-		if ext.Id.String() == "2.5.29.19" {
-			return ext.Critical
-		}
-	}
-	return false
+	return osTrustStorePEM()
 }
 
 // osTrustStorePEM exports the host OS trust store as PEM. macOS keeps roots in

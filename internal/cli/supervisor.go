@@ -137,12 +137,13 @@ func (h *hostSupervisor) Start() error {
 
 // writeUpstreamCABundle composes the CA bundle mitmproxy uses to verify upstream
 // (real server) TLS and writes it to $PPP_DATA/wg/upstream-ca.pem, returning its
-// path. It is the host OS trust store minus CA certs OpenSSL 3 rejects
-// (non-critical BasicConstraints). Normal public chains verify against it
-// directly; interception chains are handled at handshake time by the addon's
-// verify callback (ADR-0006), which authorizes them against the host trust
-// store — so no probed/vendored interception cert is baked into this bundle.
-// PPP_UPSTREAM_CA overrides the whole thing.
+// path. It is the host OS trust store exported as-is (internal/catrust): mitmproxy
+// otherwise verifies only against certifi and would have no anchor for an
+// interception chain on a TLS-inspecting network. With the OS store as the
+// bundle, mitmproxy's default verification anchors the intercepted chain at the
+// interception root the host already trusts while still rejecting genuinely bad
+// certs — no cert filtering or custom callback needed (ADR-0006). PPP_UPSTREAM_CA
+// overrides the whole thing.
 func writeUpstreamCABundle(dataDir string) (string, error) {
 	bundle, err := catrust.Compose(os.Getenv("PPP_UPSTREAM_CA"))
 	if err != nil {
